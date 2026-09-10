@@ -2,6 +2,7 @@ import multiprocessing
 import os
 import pickle
 import platform
+import shutil
 import tarfile
 import time
 import urllib.request
@@ -549,6 +550,7 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
     structure_dir: Path,
     records_dir: Path,
     processed_timing_dir: Optional[Path] = None,
+    processed_inputs_dir: Optional[Path] = None,
 ) -> None:
     start = time.perf_counter()
     msa_seconds = 0.0
@@ -664,6 +666,12 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
         # Dump record
         record_path = records_dir / f"{target.record.id}.json"
         target.record.dump(record_path)
+
+        # Keep a copy of the input, which the writer saves with the predictions
+        if processed_inputs_dir is not None:
+            processed_inputs_dir.mkdir(parents=True, exist_ok=True)
+            input_copy = processed_inputs_dir / f"{target.record.id}{path.suffix}"
+            shutil.copy2(path, input_copy)
 
         # Dump preprocessing timing
         if processed_timing_dir is not None:
@@ -814,6 +822,7 @@ def process_inputs(
         structure_dir=structure_dir,
         records_dir=records_dir,
         processed_timing_dir=out_dir / "processed" / "timing",
+        processed_inputs_dir=out_dir / "processed" / "inputs",
     )
 
     # Parse input data
@@ -1284,6 +1293,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         extra_mols_dir=processed.extra_mols_dir,
         ccd_path=ccd_path,
         timing_dir=processed_dir / "timing",
+        inputs_dir=processed_dir / "inputs",
     )
     pred_writer.timer.run["download_seconds"] = download_seconds
 
