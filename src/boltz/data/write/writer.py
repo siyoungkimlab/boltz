@@ -1,17 +1,25 @@
 import json
+import pickle
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import numpy as np
 import torch
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import BasePredictionWriter
+from rdkit.Chem import Mol
 from torch import Tensor
 
 from boltz.data.types import Coords, Interface, Record, Structure, StructureV2
+from boltz.data.write.dms import to_dms
+from boltz.data.write.mae import to_mae
 from boltz.data.write.mmcif import to_mmcif
 from boltz.data.write.pdb import to_pdb
+
+# Formats that write bond orders and formal charges, read from the reference
+# molecules rather than from the structure alone.
+CHEMISTRY_FORMATS = ("mae", "dms")
 
 
 class BoltzWriter(BasePredictionWriter):
@@ -21,9 +29,13 @@ class BoltzWriter(BasePredictionWriter):
         self,
         data_dir: str,
         output_dir: str,
-        output_format: Literal["pdb", "mmcif"] = "mmcif",
+        output_format: Literal["pdb", "mmcif", "mae", "dms"] = "mmcif",
         boltz2: bool = False,
         write_embeddings: bool = False,
+        *,
+        mol_dir: Optional[str] = None,
+        extra_mols_dir: Optional[str] = None,
+        ccd_path: Optional[str] = None,
     ) -> None:
         """Initialize the writer.
 
@@ -31,10 +43,18 @@ class BoltzWriter(BasePredictionWriter):
         ----------
         output_dir : str
             The directory to save the predictions.
+        mol_dir : str, optional
+            The CCD molecules directory, read for the MAE and DMS formats.
+        extra_mols_dir : str, optional
+            The processed molecules of each record (its SMILES ligands), read
+            for the MAE and DMS formats.
+        ccd_path : str, optional
+            The CCD dictionary, read for the MAE and DMS formats when a residue
+            is not in ``mol_dir``. Boltz-1 downloads only this.
 
         """
         super().__init__(write_interval="batch")
-        if output_format not in ["pdb", "mmcif"]:
+        if output_format not in ["pdb", "mmcif", *CHEMISTRY_FORMATS]:
             msg = f"Invalid output format: {output_format}"
             raise ValueError(msg)
 
@@ -45,6 +65,46 @@ class BoltzWriter(BasePredictionWriter):
         self.boltz2 = boltz2
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.write_embeddings = write_embeddings
+        self.mol_dir = None if mol_dir is None else Path(mol_dir)
+        self.extra_mols_dir = None if extra_mols_dir is None else Path(extra_mols_dir)
+        self.ccd_path = None if ccd_path is None else Path(ccd_path)
+        self.ccd: Optional[dict[str, Mol]] = None
+        self.ccd_mols: dict[str, Optional[Mol]] = {}
+
+    def load_molecules(self, record_id: str, structure: Structure) -> dict[str, Mol]:
+        """Get the reference molecule of every residue in a structure.
+
+        These are the molecules the featurizer read the atoms from: the record's
+        own (its SMILES ligands) first, then the CCD. A residue found in neither
+        is left out, and written from what the structure stores.
+        """
+        molecules = {}
+        if self.extra_mols_dir is not None:
+            path = self.extra_mols_dir / f"{record_id}.pkl"
+            if path.exists():
+                with path.open("rb") as f:
+                    molecules.update(pickle.load(f))  # noqa: S301
+
+        for name in set(structure.residues["name"].tolist()) - set(molecules):
+            if name not in self.ccd_mols:
+                self.ccd_mols[name] = self.load_ccd_molecule(name)
+            if self.ccd_mols[name] is not None:
+                molecules[name] = self.ccd_mols[name]
+        return molecules
+
+    def load_ccd_molecule(self, name: str) -> Optional[Mol]:
+        """Get a CCD molecule from ``mol_dir``, or else from the CCD dictionary."""
+        if self.mol_dir is not None:
+            path = self.mol_dir / f"{name}.pkl"
+            if path.exists():
+                with path.open("rb") as f:
+                    return pickle.load(f)  # noqa: S301
+
+        # Boltz-1 has no mol_dir, so its CCD dictionary is loaded, once, instead.
+        if self.ccd is None and self.ccd_path is not None and self.ccd_path.exists():
+            with self.ccd_path.open("rb") as f:
+                self.ccd = pickle.load(f)  # noqa: S301
+        return None if self.ccd is None else self.ccd.get(name)
 
     def write_on_batch_end(
         self,
@@ -95,6 +155,11 @@ class BoltzWriter(BasePredictionWriter):
 
             # Remove masked chains completely
             structure = structure.remove_invalid_chains()
+
+            # Load the reference molecules, for the formats that need them
+            molecules = {}
+            if self.output_format in CHEMISTRY_FORMATS:
+                molecules = self.load_molecules(record.id, structure)
 
             for model_idx in range(coord.shape[0]):
                 # Get model coord
@@ -171,6 +236,27 @@ class BoltzWriter(BasePredictionWriter):
                         f.write(
                             to_mmcif(new_structure, plddts=plddts, boltz2=self.boltz2)
                         )
+                elif self.output_format == "mae":
+                    path = struct_dir / f"{outname}.mae"
+                    with path.open("w") as f:
+                        f.write(
+                            to_mae(
+                                new_structure,
+                                molecules,
+                                plddts=plddts,
+                                boltz2=self.boltz2,
+                                title=outname,
+                            )
+                        )
+                elif self.output_format == "dms":
+                    path = struct_dir / f"{outname}.dms"
+                    to_dms(
+                        path,
+                        new_structure,
+                        molecules,
+                        plddts=plddts,
+                        boltz2=self.boltz2,
+                    )
                 else:
                     path = struct_dir / f"{outname}.npz"
                     np.savez_compressed(path, **asdict(new_structure))
