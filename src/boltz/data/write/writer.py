@@ -17,6 +17,7 @@ from boltz.data.write.dms import to_dms
 from boltz.data.write.mae import to_mae
 from boltz.data.write.mmcif import to_mmcif
 from boltz.data.write.pdb import to_pdb
+from boltz.data.write.properties import confidence_properties
 from boltz.timing import PredictionTimer, read_preprocessing_timing, write_timing
 
 # Formats that write bond orders and formal charges, read from the reference
@@ -259,55 +260,10 @@ class BoltzWriter(TimedPredictionWriter):
                 # Create path name
                 outname = f"{record.id}_model_{idx_to_rank[model_idx]}"
 
-                # Save the structure
-                if self.output_format == "pdb":
-                    path = struct_dir / f"{outname}.pdb"
-                    with path.open("w") as f:
-                        f.write(
-                            to_pdb(new_structure, plddts=plddts, boltz2=self.boltz2)
-                        )
-                elif self.output_format == "mmcif":
-                    path = struct_dir / f"{outname}.cif"
-                    with path.open("w") as f:
-                        f.write(
-                            to_mmcif(new_structure, plddts=plddts, boltz2=self.boltz2)
-                        )
-                elif self.output_format == "mae":
-                    path = struct_dir / f"{outname}.mae"
-                    with path.open("w") as f:
-                        f.write(
-                            to_mae(
-                                new_structure,
-                                molecules,
-                                plddts=plddts,
-                                boltz2=self.boltz2,
-                                title=outname,
-                            )
-                        )
-                elif self.output_format == "dms":
-                    path = struct_dir / f"{outname}.dms"
-                    to_dms(
-                        path,
-                        new_structure,
-                        molecules,
-                        plddts=plddts,
-                        boltz2=self.boltz2,
-                    )
-                else:
-                    path = struct_dir / f"{outname}.npz"
-                    np.savez_compressed(path, **asdict(new_structure))
-
-                if self.boltz2 and record.affinity and idx_to_rank[model_idx] == 0:
-                    path = struct_dir / f"pre_affinity_{record.id}.npz"
-                    np.savez_compressed(path, **asdict(new_structure))
-                    np.array(atoms["coords"][:, None], dtype=Coords)
-
-                # Save confidence summary
+                # Get the confidence summary, also written into MAE and DMS
+                confidence_summary_dict = None
+                properties = None
                 if "plddt" in prediction:
-                    path = (
-                        struct_dir
-                        / f"confidence_{record.id}_model_{idx_to_rank[model_idx]}.json"
-                    )
                     confidence_summary_dict = {}
                     for key in [
                         "confidence_score",
@@ -334,6 +290,62 @@ class BoltzWriter(TimedPredictionWriter):
                         }
                         for idx1 in prediction["pair_chains_iptm"]
                     }
+                    properties = confidence_properties(
+                        confidence_summary_dict, new_structure
+                    )
+
+                # Save the structure
+                if self.output_format == "pdb":
+                    path = struct_dir / f"{outname}.pdb"
+                    with path.open("w") as f:
+                        f.write(
+                            to_pdb(new_structure, plddts=plddts, boltz2=self.boltz2)
+                        )
+                elif self.output_format == "mmcif":
+                    path = struct_dir / f"{outname}.cif"
+                    with path.open("w") as f:
+                        f.write(
+                            to_mmcif(new_structure, plddts=plddts, boltz2=self.boltz2)
+                        )
+                elif self.output_format == "mae":
+                    path = struct_dir / f"{outname}.mae"
+                    with path.open("w") as f:
+                        f.write(
+                            to_mae(
+                                new_structure,
+                                molecules,
+                                plddts=plddts,
+                                boltz2=self.boltz2,
+                                title=outname,
+                                properties=properties,
+                            )
+                        )
+                elif self.output_format == "dms":
+                    path = struct_dir / f"{outname}.dms"
+                    to_dms(
+                        path,
+                        new_structure,
+                        molecules,
+                        plddts=plddts,
+                        boltz2=self.boltz2,
+                        title=outname,
+                        properties=properties,
+                    )
+                else:
+                    path = struct_dir / f"{outname}.npz"
+                    np.savez_compressed(path, **asdict(new_structure))
+
+                if self.boltz2 and record.affinity and idx_to_rank[model_idx] == 0:
+                    path = struct_dir / f"pre_affinity_{record.id}.npz"
+                    np.savez_compressed(path, **asdict(new_structure))
+                    np.array(atoms["coords"][:, None], dtype=Coords)
+
+                # Save confidence summary
+                if "plddt" in prediction:
+                    path = (
+                        struct_dir
+                        / f"confidence_{record.id}_model_{idx_to_rank[model_idx]}.json"
+                    )
                     with path.open("w") as f:
                         f.write(
                             json.dumps(

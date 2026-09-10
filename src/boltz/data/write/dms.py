@@ -16,6 +16,9 @@ def to_dms(
     molecules: dict[str, Mol],
     plddts: Optional[Tensor] = None,
     boltz2: bool = False,
+    *,
+    title: str = "boltz",
+    properties: Optional[dict[str, float]] = None,
 ) -> None:
     """Write a structure into a DMS file.
 
@@ -31,10 +34,16 @@ def to_dms(
         The input structure
     molecules : dict[str, Mol]
         Reference molecules by residue name.
+    title : str
+        The name of the structure.
+    properties : dict[str, float], optional
+        Properties of the whole structure, such as its confidence scores,
+        written as columns of its row in the ``msys_ct`` table.
 
     """
     topology = build_topology(structure, molecules, plddts=plddts, boltz2=boltz2)
     periodic_table = Chem.GetPeriodicTable()
+    properties = properties or {}
 
     path.unlink(missing_ok=True)
     con = sqlite3.connect(path)
@@ -42,16 +51,17 @@ def to_dms(
         with con:
             con.execute("create table dms_version (major integer, minor integer)")
             con.execute("insert into dms_version values (1, 7)")
+            # Every particle belongs to the one structure, ct 0 in msys_ct.
             con.execute(
                 "create table particle (id integer primary key, anum integer, "
                 "name text, x float, y float, z float, vx float, vy float, "
                 "vz float, resname text, resid integer, insertion text, "
                 "chain text, segid text, mass float, charge float, "
-                "formal_charge integer, bfactor float)"
+                "formal_charge integer, msys_ct integer, bfactor float)"
             )
             con.executemany(
                 "insert into particle values "
-                "(?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, '', ?, '', ?, 0, ?, ?)",
+                "(?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, '', ?, '', ?, 0, ?, 0, ?)",
                 [
                     (
                         index,
@@ -79,6 +89,19 @@ def to_dms(
             )
             con.executemany(
                 "insert into global_cell values (?, 0, 0, 0)", [(0,), (1,), (2,)]
+            )
+            # The structure's own properties, a column each, as msys writes them.
+            # Their names are Boltz's own: confidence keys and chain labels
+            # reduced to word characters, so the SQL cannot be injected.
+            columns = "".join(f', "{name}" float' for name in properties)
+            con.execute(
+                "create table msys_ct "
+                f"(id integer primary key, msys_name text{columns})"
+            )
+            placeholders = ", ?" * len(properties)
+            con.execute(
+                f"insert into msys_ct values (0, ?{placeholders})",  # noqa: S608
+                (title, *properties.values()),
             )
     finally:
         con.close()
