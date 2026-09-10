@@ -29,7 +29,11 @@ from boltz.data.parse.csv import parse_csv
 from boltz.data.parse.fasta import parse_fasta
 from boltz.data.parse.yaml import parse_yaml
 from boltz.data.types import MSA, Manifest, Record
-from boltz.data.write.writer import BoltzAffinityWriter, BoltzWriter
+from boltz.data.write.writer import (
+    CHEMISTRY_FORMATS,
+    BoltzAffinityWriter,
+    BoltzWriter,
+)
 from boltz.model.models.boltz1 import Boltz1
 from boltz.model.models.boltz2 import Boltz2
 
@@ -900,9 +904,12 @@ def cli() -> None:
 )
 @click.option(
     "--output_format",
-    type=click.Choice(["pdb", "mmcif"]),
-    help="The output format to use for the predictions. Default is mmcif.",
-    default="mmcif",
+    type=click.Choice(["pdb", "mmcif", *CHEMISTRY_FORMATS]),
+    help=(
+        "The output format to use for the predictions. mae and dms also keep "
+        "bond orders and formal charges. Default is mae."
+    ),
+    default="mae",
 )
 @click.option(
     "--num_workers",
@@ -1056,7 +1063,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     step_scale: Optional[float] = None,
     write_full_pae: bool = False,
     write_full_pde: bool = False,
-    output_format: Literal["pdb", "mmcif"] = "mmcif",
+    output_format: Literal["pdb", "mmcif", "mae", "dms"] = "mae",
     num_workers: int = 2,
     override: bool = False,
     seed: Optional[int] = None,
@@ -1250,6 +1257,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         output_format=output_format,
         boltz2=model == "boltz2",
         write_embeddings=write_embeddings,
+        mol_dir=mol_dir,
+        extra_mols_dir=processed.extra_mols_dir,
+        ccd_path=ccd_path,
     )
 
     # Set up trainer
