@@ -38,6 +38,7 @@ from boltz.data.write.writer import (
 )
 from boltz.model.models.boltz1 import Boltz1
 from boltz.model.models.boltz2 import Boltz2
+from boltz.pointprobe import make_pointprobe_command
 from boltz.timing import write_preprocessing_timing
 
 CCD_URL = "https://huggingface.co/boltz-community/boltz-1/resolve/main/ccd.pkl"
@@ -1462,6 +1463,10 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             datamodule=data_module,
             return_predictions=False,
         )
+
+
+# boltz pointprobe runs boltz predict once per residue, with its options
+cli.add_command(make_pointprobe_command(predict, compute_msa))
 
 
 if __name__ == "__main__":
