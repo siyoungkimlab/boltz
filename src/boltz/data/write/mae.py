@@ -54,7 +54,9 @@ def to_mae(
     molecules: dict[str, Mol],
     plddts: Optional[Tensor] = None,
     boltz2: bool = False,
+    *,
     title: str = "boltz",
+    properties: Optional[dict[str, float]] = None,
 ) -> str:
     """Write a structure into a Maestro file.
 
@@ -69,6 +71,9 @@ def to_mae(
         Reference molecules by residue name.
     title : str
         The title of the structure.
+    properties : dict[str, float], optional
+        Properties of the whole structure, such as its confidence scores,
+        written as ``r_<name>`` in its ``f_m_ct`` block.
 
     Returns
     -------
@@ -78,7 +83,12 @@ def to_mae(
     """
     topology = build_topology(structure, molecules, plddts=plddts, boltz2=boltz2)
 
-    lines = [_MAE_VERSION_BLOCK + "f_m_ct {", " s_m_title", " :::", f" {_quote(title)}"]
+    header = [("s_m_title", _quote(title))]
+    header += [(f"r_{name}", repr(value)) for name, value in (properties or {}).items()]
+    lines = [_MAE_VERSION_BLOCK + "f_m_ct {"]
+    lines.extend(f" {key}" for key, _ in header)
+    lines.append(" :::")
+    lines.extend(f" {value}" for _, value in header)
 
     lines.append(f" m_atom[{len(topology.atoms)}] {{")
     lines.extend(f"  {column}" for column in _ATOM_COLUMNS)

@@ -227,6 +227,8 @@ Each output folder includes a confidence `.json` file with aggregated confidence
 ```
 `confidence_score`, `ptm` and `plddt` scores (and their interface and individual chain analogues) have a range of [0, 1], where higher values indicate higher confidence. `pde` scores have a unit of angstroms, where lower values indicate higher confidence.
 
+With `--output_format mae` or `dms`, each structure file also carries its confidence summary, so the scores stay with the structure wherever it is loaded. They keep their names with a `boltz_` prefix, and the per-chain scores are named by chain rather than by chain index. In an MAE file they are properties of the structure (`r_boltz_confidence_score`, `r_boltz_chain_ptm_A`, `r_boltz_pair_chains_iptm_A_B`, ...); in a DMS file they are columns of the `msys_ct` table (`boltz_confidence_score`, `boltz_chain_ptm_A`, ...). msys reads both as the same structure properties.
+
 Each output folder also includes a timing `.json` file with how long each stage of the prediction took, in seconds, and a second one for the affinity prediction when it is requested. On a GPU, the device is synchronized at every stage boundary, so each stage is timed accurately. Its structure is (times from a CPU run):
 ```yaml
 {
