@@ -1294,7 +1294,8 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         callbacks=[pred_writer],
         accelerator=accelerator,
         devices=devices,
-        precision=32 if model == "boltz1" else "bf16-mixed",
+        # bf16 is only fast on accelerators; on a CPU it is far slower than fp32.
+        precision=32 if model == "boltz1" or accelerator == "cpu" else "bf16-mixed",
     )
 
     if filtered_manifest.records:
