@@ -1,5 +1,6 @@
 import json
 import pickle
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Literal, Optional
@@ -16,13 +17,42 @@ from boltz.data.write.dms import to_dms
 from boltz.data.write.mae import to_mae
 from boltz.data.write.mmcif import to_mmcif
 from boltz.data.write.pdb import to_pdb
+from boltz.timing import PredictionTimer, read_preprocessing_timing, write_timing
 
 # Formats that write bond orders and formal charges, read from the reference
 # molecules rather than from the structure alone.
 CHEMISTRY_FORMATS = ("mae", "dms")
 
 
-class BoltzWriter(BasePredictionWriter):
+class TimedPredictionWriter(BasePredictionWriter):
+    """A prediction writer that times the stages of each prediction."""
+
+    def __init__(self) -> None:
+        super().__init__(write_interval="batch")
+        self.timer = PredictionTimer()
+
+    def on_predict_start(
+        self,
+        trainer: Trainer,  # noqa: ARG002
+        pl_module: LightningModule,
+    ) -> None:
+        """Time the stages of the model about to predict."""
+        self.timer.attach(pl_module)
+        self.timer.start_run()
+
+    def on_predict_batch_start(
+        self,
+        trainer: Trainer,  # noqa: ARG002
+        pl_module: LightningModule,
+        batch: dict[str, Tensor],  # noqa: ARG002
+        batch_idx: int,  # noqa: ARG002
+        dataloader_idx: int = 0,  # noqa: ARG002
+    ) -> None:
+        """Start timing a prediction."""
+        self.timer.start_prediction(pl_module.device)
+
+
+class BoltzWriter(TimedPredictionWriter):
     """Custom writer for predictions."""
 
     def __init__(
@@ -36,6 +66,7 @@ class BoltzWriter(BasePredictionWriter):
         mol_dir: Optional[str] = None,
         extra_mols_dir: Optional[str] = None,
         ccd_path: Optional[str] = None,
+        timing_dir: Optional[str] = None,
     ) -> None:
         """Initialize the writer.
 
@@ -51,9 +82,11 @@ class BoltzWriter(BasePredictionWriter):
         ccd_path : str, optional
             The CCD dictionary, read for the MAE and DMS formats when a residue
             is not in ``mol_dir``. Boltz-1 downloads only this.
+        timing_dir : str, optional
+            The preprocessing times of each record, reported in its timing file.
 
         """
-        super().__init__(write_interval="batch")
+        super().__init__()
         if output_format not in ["pdb", "mmcif", *CHEMISTRY_FORMATS]:
             msg = f"Invalid output format: {output_format}"
             raise ValueError(msg)
@@ -70,6 +103,7 @@ class BoltzWriter(BasePredictionWriter):
         self.ccd_path = None if ccd_path is None else Path(ccd_path)
         self.ccd: Optional[dict[str, Mol]] = None
         self.ccd_mols: dict[str, Optional[Mol]] = {}
+        self.timing_dir = None if timing_dir is None else Path(timing_dir)
 
     def load_molecules(self, record_id: str, structure: Structure) -> dict[str, Mol]:
         """Get the reference molecule of every residue in a structure.
@@ -117,8 +151,10 @@ class BoltzWriter(BasePredictionWriter):
         dataloader_idx: int,  # noqa: ARG002
     ) -> None:
         """Write the predictions to disk."""
+        write_start = time.perf_counter()
         if prediction["exception"]:
             self.failed += 1
+            self.timer.end_prediction()
             return
 
         # Get the records
@@ -343,6 +379,14 @@ class BoltzWriter(BasePredictionWriter):
                 )
                 np.savez_compressed(path, s=s, z=z)
 
+        # Save timing
+        self.timer.add("write_outputs", time.perf_counter() - write_start)
+        for record in records:
+            path = self.output_dir / record.id / f"timing_{record.id}.json"
+            preprocessing = read_preprocessing_timing(self.timing_dir, record.id)
+            write_timing(path, self.timer.report(record.id, preprocessing))
+        self.timer.end_prediction()
+
     def on_predict_epoch_end(
         self,
         trainer: Trainer,  # noqa: ARG002
@@ -353,7 +397,7 @@ class BoltzWriter(BasePredictionWriter):
         print(f"Number of failed examples: {self.failed}")  # noqa: T201
 
 
-class BoltzAffinityWriter(BasePredictionWriter):
+class BoltzAffinityWriter(TimedPredictionWriter):
     """Custom writer for predictions."""
 
     def __init__(
@@ -369,7 +413,7 @@ class BoltzAffinityWriter(BasePredictionWriter):
             The directory to save the predictions.
 
         """
-        super().__init__(write_interval="batch")
+        super().__init__()
         self.failed = 0
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
@@ -386,8 +430,10 @@ class BoltzAffinityWriter(BasePredictionWriter):
         dataloader_idx: int,  # noqa: ARG002
     ) -> None:
         """Write the predictions to disk."""
+        write_start = time.perf_counter()
         if prediction["exception"]:
             self.failed += 1
+            self.timer.end_prediction()
             return
         # Dump affinity summary
         affinity_summary = {}
@@ -418,6 +464,13 @@ class BoltzAffinityWriter(BasePredictionWriter):
 
         with path.open("w") as f:
             f.write(json.dumps(affinity_summary, indent=4))
+
+        # Save timing
+        self.timer.add("write_outputs", time.perf_counter() - write_start)
+        record_id = batch["record"][0].id
+        path = struct_dir / f"timing_affinity_{record_id}.json"
+        write_timing(path, self.timer.report(record_id, preprocessing=None))
+        self.timer.end_prediction()
 
     def on_predict_epoch_end(
         self,

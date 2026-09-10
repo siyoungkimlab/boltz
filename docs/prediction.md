@@ -186,6 +186,8 @@ out_dir/
         ├── pae_[input_file1]_model_0.npz                      # The predicted PAE score for every pair of tokens
         ├── pde_[input_file1]_model_0.npz                      # The predicted PDE score for every pair of tokens
         ├── plddt_[input_file1]_model_0.npz                    # The predicted pLDDT score for every token
+        ├── timing_[input_file1].json                          # How long each stage of the prediction took
+        ├── timing_affinity_[input_file1].json                 # How long each stage of the affinity prediction took
         ...
         └── [input_file1]_model_[diffusion_samples-1].cif      # The predicted structure in CIF format
         ...
@@ -224,6 +226,37 @@ Each output folder includes a confidence `.json` file with aggregated confidence
 }
 ```
 `confidence_score`, `ptm` and `plddt` scores (and their interface and individual chain analogues) have a range of [0, 1], where higher values indicate higher confidence. `pde` scores have a unit of angstroms, where lower values indicate higher confidence.
+
+Each output folder also includes a timing `.json` file with how long each stage of the prediction took, in seconds, and a second one for the affinity prediction when it is requested. On a GPU, the device is synchronized at every stage boundary, so each stage is timed accurately. Its structure is (times from a CPU run):
+```yaml
+{
+    "id": "input_file1",
+    "device": "cpu",
+    "preprocessing": {                      # Once per input, before the model runs (null in the affinity file)
+        "msa_server_seconds": 0.6782,       # Waiting on the MSA server, 0 when the MSA is provided
+        "parse_and_dump_seconds": 0.09,     # Parsing the input and writing its processed files
+        "total_seconds": 0.7683
+    },
+    "run": {                                # Once per run, shared by every input in it
+        "download_seconds": 0.0,            # Downloading the weights and CCD data, 0 once they are cached
+        "model_load_seconds": 10.2444       # Loading the checkpoint
+    },
+    "prediction": {                         # Each stage, with how many times it ran
+        "data_loading": {"seconds": 0.0783, "calls": 1},          # Reading the input and building its features
+        "input_embedding": {"seconds": 0.0285, "calls": 5},
+        "template_module": {"seconds": 0.1464, "calls": 4},       # Once per recycling step
+        "msa_module": {"seconds": 0.4325, "calls": 4},            # Once per recycling step
+        "pairformer": {"seconds": 6.7869, "calls": 4},            # Once per recycling step
+        "distogram": {"seconds": 0.0003, "calls": 1},
+        "diffusion_conditioning": {"seconds": 0.0202, "calls": 1},
+        "diffusion_sampling": {"seconds": 21.9486, "calls": 1},   # Every sampling step of every diffusion sample
+        "confidence": {"seconds": 0.2269, "calls": 1},
+        "forward_total": {"seconds": 29.5947, "calls": 1},        # The whole model, including the stages above
+        "predict_step_total": {"seconds": 29.5948, "calls": 1},   # The model and turning its output into predictions
+        "write_outputs": {"seconds": 0.0071, "calls": 1}          # Writing the structure and confidence files
+    }
+}
+```
 
 The output affinity `.json` file is organized as follows:
 ```yaml

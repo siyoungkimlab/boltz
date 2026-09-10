@@ -3,6 +3,7 @@ import os
 import pickle
 import platform
 import tarfile
+import time
 import urllib.request
 import warnings
 from dataclasses import asdict, dataclass
@@ -36,6 +37,7 @@ from boltz.data.write.writer import (
 )
 from boltz.model.models.boltz1 import Boltz1
 from boltz.model.models.boltz2 import Boltz2
+from boltz.timing import write_preprocessing_timing
 
 CCD_URL = "https://huggingface.co/boltz-community/boltz-1/resolve/main/ccd.pkl"
 MOL_URL = "https://huggingface.co/boltz-community/boltz-2/resolve/main/mols.tar"
@@ -546,7 +548,10 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
     processed_mols_dir: Path,
     structure_dir: Path,
     records_dir: Path,
+    processed_timing_dir: Optional[Path] = None,
 ) -> None:
+    start = time.perf_counter()
+    msa_seconds = 0.0
     try:
         # Parse data
         if path.suffix.lower() in (".fa", ".fas", ".fasta"):
@@ -589,6 +594,7 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
         if to_generate:
             msg = f"Generating MSA for {path} with {len(to_generate)} protein entities."
             click.echo(msg)
+            msa_start = time.perf_counter()
             compute_msa(
                 data=to_generate,
                 target_id=target_id,
@@ -600,6 +606,7 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
                 api_key_header=api_key_header,
                 api_key_value=api_key_value,
             )
+            msa_seconds = time.perf_counter() - msa_start
 
         # Parse MSA data
         msas = sorted({c.msa_id for c in target.record.chains if c.msa_id != -1})
@@ -657,6 +664,19 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
         # Dump record
         record_path = records_dir / f"{target.record.id}.json"
         target.record.dump(record_path)
+
+        # Dump preprocessing timing
+        if processed_timing_dir is not None:
+            total = time.perf_counter() - start
+            write_preprocessing_timing(
+                processed_timing_dir,
+                target.record.id,
+                {
+                    "msa_server_seconds": msa_seconds,
+                    "parse_and_dump_seconds": total - msa_seconds,
+                    "total_seconds": total,
+                },
+            )
 
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -793,6 +813,7 @@ def process_inputs(
         processed_mols_dir=processed_mols_dir,
         structure_dir=structure_dir,
         records_dir=records_dir,
+        processed_timing_dir=out_dir / "processed" / "timing",
     )
 
     # Parse input data
@@ -1142,6 +1163,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Download necessary data and model
+    download_start = time.perf_counter()
     if model == "boltz1":
         download_boltz1(cache)
     elif model == "boltz2":
@@ -1149,6 +1171,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     else:
         msg = f"Model {model} not supported. Supported: boltz1, boltz2."
         raise ValueError(f"Model {model} not supported.")
+    download_seconds = time.perf_counter() - download_start
 
     # Validate inputs
     data = check_inputs(data)
@@ -1260,7 +1283,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         mol_dir=mol_dir,
         extra_mols_dir=processed.extra_mols_dir,
         ccd_path=ccd_path,
+        timing_dir=processed_dir / "timing",
     )
+    pred_writer.timer.run["download_seconds"] = download_seconds
 
     # Set up trainer
     trainer = Trainer(
@@ -1321,6 +1346,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args.physical_guidance_update = use_potentials
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
+        load_start = time.perf_counter()
         model_module = model_cls.load_from_checkpoint(
             checkpoint,
             strict=True,
@@ -1334,6 +1360,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             steering_args=asdict(steering_args),
         )
         model_module.eval()
+        pred_writer.timer.run["model_load_seconds"] = (
+            time.perf_counter() - load_start
+        )
 
         # Compute structure predictions
         trainer.predict(
@@ -1398,6 +1427,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args.physical_guidance_update = False
         steering_args.contact_guidance_update = False
         
+        load_start = time.perf_counter()
         model_module = Boltz2.load_from_checkpoint(
             affinity_checkpoint,
             strict=True,
@@ -1411,6 +1441,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             affinity_mw_correction=affinity_mw_correction,
         )
         model_module.eval()
+        pred_writer.timer.run["model_load_seconds"] = (
+            time.perf_counter() - load_start
+        )
 
         trainer.callbacks[0] = pred_writer
         trainer.predict(
