@@ -22,7 +22,14 @@ All the code and weights are provided under MIT license, making them freely avai
 
 > This is a fork of [Boltz](https://github.com/jwohlwend/boltz) with [its own changes](#changes-in-this-fork). `pip install boltz` installs the original Boltz from PyPI, not this fork, so install it from GitHub as below.
 
-> Note: we recommend installing boltz in a fresh python environment. Both the original and this fork are named `boltz`, so if the original is installed there, remove it first with `pip uninstall boltz`.
+> Note: we recommend installing boltz in a fresh python environment, with Python 3.10, 3.11 or 3.12: Boltz does not install on Python 3.13 or later. Both the original and this fork are named `boltz`, so if the original is installed there, remove it first with `pip uninstall boltz`.
+
+For example, with conda:
+
+```
+conda create -n boltz python=3.12 -y
+conda activate boltz
+```
 
 Install this fork directly from GitHub:
 
