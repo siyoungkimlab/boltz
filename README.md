@@ -20,22 +20,35 @@ All the code and weights are provided under MIT license, making them freely avai
 
 ## Installation
 
-> Note: we recommend installing boltz in a fresh python environment
+> This is a fork of [Boltz](https://github.com/jwohlwend/boltz) with [its own changes](#changes-in-this-fork). `pip install boltz` installs the original Boltz from PyPI, not this fork, so install it from GitHub as below.
 
-Install boltz with PyPI (recommended):
+> Note: we recommend installing boltz in a fresh python environment. Both the original and this fork are named `boltz`, so if the original is installed there, remove it first with `pip uninstall boltz`.
 
-```
-pip install boltz[cuda] -U
-```
-
-or directly from GitHub for daily updates:
+Install this fork directly from GitHub:
 
 ```
-git clone https://github.com/jwohlwend/boltz.git
-cd boltz; pip install -e .[cuda]
+pip install "boltz[cuda] @ git+https://github.com/siyoungkimlab/boltz.git"
+```
+
+or from a clone, to read or edit the code:
+
+```
+git clone https://github.com/siyoungkimlab/boltz.git
+cd boltz; pip install -e ".[cuda]"
 ```
 
 If you are installing on CPU-only or non-CUDA GPus hardware, remove `[cuda]` from the above commands. Note that the CPU version is significantly slower than the GPU version.
+
+To check that you have this fork, run `boltz predict --help`: `--output_format` lists `mae` and `dms`.
+
+To update, run `git pull` in the clone, which an editable install picks up. For a direct install, reinstall with `pip install --force-reinstall --no-deps "boltz @ git+https://github.com/siyoungkimlab/boltz.git"`: the version number does not change between updates, so `pip install -U` may not pick up new commits.
+
+### Changes in this fork
+
+* **MAE and DMS output.** `--output_format mae` (the default) and `dms` write every bond with its order and every atom with its formal charge, which PDB and mmCIF drop, with protein residues in their pH 7 states. Each structure also carries its confidence scores. See [prediction](docs/prediction.md).
+* **Timing.** Each prediction writes a `timing_[input].json` with how long each stage took: the MSA server, model loading, the pairformer, diffusion, and so on.
+* **A copy of the input.** Each prediction folder keeps a copy of the input file it was predicted from.
+* **Faster on CPU.** On CPU, Boltz-2 runs in fp32 rather than bf16, which is several times faster there.
 
 ## Inference
 
