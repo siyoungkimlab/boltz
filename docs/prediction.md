@@ -179,6 +179,7 @@ out_dir/
 ├── lightning_logs/                                            # Logs generated during training or evaluation
 ├── predictions/                                               # Contains the model's predictions
     ├── [input_file1]/
+        ├── [input_file1].yaml                                 # A copy of the input file (.yaml or .fasta), for the record
         ├── [input_file1]_model_0.cif                          # The predicted structure in CIF format, with the inclusion of per token pLDDT scores
         ├── confidence_[input_file1]_model_0.json              # The confidence scores (confidence_score, ptm, iptm, ligand_iptm, protein_iptm, complex_plddt, complex_iplddt, chains_ptm, pair_chains_iptm)
         ├── affinity_[input_file1].json                        # The affinity scores (affinity_pred_value, affinity_probability_binary, affinity_pred_value1, affinity_probability_binary1, affinity_pred_value2, affinity_probability_binary2)

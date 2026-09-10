@@ -1,5 +1,6 @@
 import json
 import pickle
+import shutil
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -68,6 +69,7 @@ class BoltzWriter(TimedPredictionWriter):
         extra_mols_dir: Optional[str] = None,
         ccd_path: Optional[str] = None,
         timing_dir: Optional[str] = None,
+        inputs_dir: Optional[str] = None,
     ) -> None:
         """Initialize the writer.
 
@@ -85,6 +87,8 @@ class BoltzWriter(TimedPredictionWriter):
             is not in ``mol_dir``. Boltz-1 downloads only this.
         timing_dir : str, optional
             The preprocessing times of each record, reported in its timing file.
+        inputs_dir : str, optional
+            The copy of each record's input file, saved with its predictions.
 
         """
         super().__init__()
@@ -105,6 +109,7 @@ class BoltzWriter(TimedPredictionWriter):
         self.ccd: Optional[dict[str, Mol]] = None
         self.ccd_mols: dict[str, Optional[Mol]] = {}
         self.timing_dir = None if timing_dir is None else Path(timing_dir)
+        self.inputs_dir = None if inputs_dir is None else Path(inputs_dir)
 
     def load_molecules(self, record_id: str, structure: Structure) -> dict[str, Mol]:
         """Get the reference molecule of every residue in a structure.
@@ -390,6 +395,13 @@ class BoltzWriter(TimedPredictionWriter):
                     / f"embeddings_{record.id}.npz"
                 )
                 np.savez_compressed(path, s=s, z=z)
+
+        # Save a copy of the input, for the record
+        if self.inputs_dir is not None and self.inputs_dir.exists():
+            for record in records:
+                for source in self.inputs_dir.iterdir():
+                    if source.stem == record.id:
+                        shutil.copy2(source, self.output_dir / record.id / source.name)
 
         # Save timing
         self.timer.add("write_outputs", time.perf_counter() - write_start)
