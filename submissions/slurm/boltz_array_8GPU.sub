@@ -1,0 +1,64 @@
+#!/bin/bash
+#SBATCH -A siyoungk
+#SBATCH -p ai
+#SBATCH -N 1
+#SBATCH -n 1          # one task: boltz starts one process per GPU itself
+#SBATCH -c 112        # all of the node's cores for that task
+#SBATCH --exclusive   # the whole node and its memory: each GPU process loads its own model
+#SBATCH --gres=gpu:8
+#SBATCH -t 4:00:00
+#SBATCH -o %A_%a.out  # %A is the array's job id, %a the index within it
+#SBATCH -e %A_%a.err
+
+# bash bash_array_8GPU.sub
+
+# Each Gautschi-H node has
+# 8 × H100 GPUs
+# 2 × Intel Xeon Platinum 8480+
+# 112 CPU cores total (56 cores × 2)
+
+JOBNAME=XXXX
+
+# On the login node (no SLURM_JOB_ID yet): list the compounds and submit this
+# same file as a job array with one job per compound.
+if [ -z "$SLURM_JOB_ID" ]; then
+    ls yaml/*.yaml > yaml_list.txt
+    n=$(wc -l < yaml_list.txt | tr -d ' ')
+    if [ "$n" -eq 0 ]; then echo "No YAML files in yaml/"; exit 1; fi
+    sbatch -J "$JOBNAME" --array="1-$n" "$0"
+    echo "Submitted $n jobs"
+    exit 0
+fi
+
+# Inside each array job: pick this job's compound and run it.
+module load monitor
+module load conda/2026.03
+conda activate boltz
+
+yaml=$(sed -n "${SLURM_ARRAY_TASK_ID}p" yaml_list.txt)
+base=$(basename "$yaml" .yaml)
+
+hostname
+
+# track per-code CPU load and memory usage, one log per array job
+monitor cpu percent --all-cores >"cpu-percent_${base}.log" &
+CPU_PID=$!
+monitor cpu memory >"cpu-memory_${base}.log" &
+MEM_PID=$!
+
+# actual code
+# Lightning assumes srun started one process per GPU in any SLURM job.
+# Boltz starts its own, so hide the task count from Lightning.
+unset SLURM_NTASKS
+boltz pointprobe "$yaml" \
+    --model boltz1 \
+    --out_dir "$base" \
+    --diffusion_samples 5 \
+    --output_format mae \
+    --devices 8 \
+    --preprocessing-threads 1 \
+    --use_potentials --use_msa_server
+
+# shut down the resource monitors
+kill -s INT $CPU_PID $MEM_PID
+
