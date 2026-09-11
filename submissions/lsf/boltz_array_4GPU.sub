@@ -1,0 +1,46 @@
+#!/bin/bash
+#BSUB -J 
+#BSUB -q gpuqueue
+#BSUB -n 12
+#BSUB -R "span[hosts=1]"
+#BSUB -R A100
+#BSUB -R "rusage[mem=8]"
+#BSUB -gpu "num=4:mode=exclusive_process"
+#BSUB -W 168:00
+#BSUB -o %J_%I.out
+#BSUB -e %J_%I.err
+#BSUB -L /bin/bash
+
+# bash boltz_array_4GPU.sub
+
+JOBNAME=XXXX
+
+# On the login node (no LSB_JOBID yet): list the compounds and submit this
+# same file as a job array with one job per compound.
+if [ -z "$LSB_JOBID" ]; then
+    ls yaml/*.yaml > yaml_list.txt
+    n=$(wc -l < yaml_list.txt | tr -d ' ')
+    if [ "$n" -eq 0 ]; then echo "No YAML files in yaml/"; exit 1; fi
+    bsub -J "${JOBNAME}[1-$n]" < "$0"
+    echo "Submitted $n jobs"
+    exit 0
+fi
+
+# Inside each array job: pick this job's compound and run it.
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate boltz
+
+yaml=$(sed -n "${LSB_JOBINDEX}p" yaml_list.txt)
+base=$(basename "$yaml" .yaml)
+
+boltz pointprobe "$yaml" \
+    --model boltz1 \
+    --out_dir "$base" \
+    --diffusion_samples 5 \
+    --output_format mae \
+    --devices 4 \
+    --preprocessing-threads 1 \
+    --use_potentials \
+    --use_msa_server \
+    --no_kernels
+
