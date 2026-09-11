@@ -19,9 +19,10 @@
 
 JOBNAME=XXXX
 
-# On the login node (no SLURM_JOB_ID yet): list the compounds and submit this
-# same file as a job array with one job per compound.
-if [ -z "$SLURM_JOB_ID" ]; then
+# Unless this is an array job: list the compounds and submit this same file
+# as a job array with one job per compound. Checking the array index, not
+# SLURM_JOB_ID, also works from inside an interactive salloc session.
+if [ -z "$SLURM_ARRAY_TASK_ID" ]; then
     ls yaml/*.yaml > yaml_list.txt
     n=$(wc -l < yaml_list.txt | tr -d ' ')
     if [ "$n" -eq 0 ]; then echo "No YAML files in yaml/"; exit 1; fi

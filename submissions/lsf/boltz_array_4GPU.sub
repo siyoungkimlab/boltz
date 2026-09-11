@@ -15,9 +15,10 @@
 
 JOBNAME=XXXX
 
-# On the login node (no LSB_JOBID yet): list the compounds and submit this
-# same file as a job array with one job per compound.
-if [ -z "$LSB_JOBID" ]; then
+# Unless this is an array job (index 1, 2, ...): list the compounds and submit
+# this same file as a job array with one job per compound. Checking the index,
+# not LSB_JOBID, also works from inside an interactive LSF session.
+if [ -z "$LSB_JOBINDEX" ] || [ "$LSB_JOBINDEX" -eq 0 ]; then
     ls yaml/*.yaml > yaml_list.txt
     n=$(wc -l < yaml_list.txt | tr -d ' ')
     if [ "$n" -eq 0 ]; then echo "No YAML files in yaml/"; exit 1; fi
