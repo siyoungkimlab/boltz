@@ -1,5 +1,5 @@
 #!/bin/bash
-#BSUB -J 
+#BSUB -J boltz
 #BSUB -q gpuqueue
 #BSUB -n 12
 #BSUB -R "span[hosts=1]"

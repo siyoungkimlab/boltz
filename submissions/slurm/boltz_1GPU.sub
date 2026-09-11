@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J
+#SBATCH -J boltz
 #SBATCH -A siyoungk
 #SBATCH -p ai
 #SBATCH -N 1
