@@ -1,5 +1,4 @@
 #!/bin/bash
-#BSUB -J 
 #BSUB -q gpuqueue
 #BSUB -n 12
 #BSUB -R "span[hosts=1]"
