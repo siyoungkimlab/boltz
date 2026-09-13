@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 import click
 import torch
@@ -39,6 +39,7 @@ from boltz.data.write.writer import (
 from boltz.model.models.boltz1 import Boltz1
 from boltz.model.models.boltz2 import Boltz2
 from boltz.pointprobe import make_pointprobe_command
+from boltz.screen import make_screen_command
 from boltz.timing import write_preprocessing_timing
 
 CCD_URL = "https://huggingface.co/boltz-community/boltz-1/resolve/main/ccd.pkl"
@@ -694,6 +695,29 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
         print(f"Failed to process {path}. Skipping. Error: {e}.")  # noqa: T201
 
 
+def available_cpus() -> int:
+    """Count the CPUs this process may use, which a scheduler may limit."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # macOS has no sched_getaffinity
+        return multiprocessing.cpu_count()
+
+
+# The function each preprocessing worker runs, set once when the worker starts.
+# Sent with every input instead, as a pool does, Boltz-1's CCD dictionary made
+# preprocessing take about a minute per input.
+_worker_process_input: Optional[Callable[[Path], None]] = None
+
+
+def _init_process_input_worker(function: Callable[[Path], None]) -> None:
+    global _worker_process_input  # noqa: PLW0603
+    _worker_process_input = function
+
+
+def _process_input_in_worker(path: Path) -> None:
+    _worker_process_input(path)
+
+
 @rank_zero_only
 def process_inputs(
     data: list[Path],
@@ -831,8 +855,12 @@ def process_inputs(
     click.echo(f"Processing {len(data)} inputs with {preprocessing_threads} threads.")
 
     if preprocessing_threads > 1 and len(data) > 1:
-        with Pool(preprocessing_threads) as pool:
-            list(tqdm(pool.imap(process_input_partial, data), total=len(data)))
+        with Pool(
+            preprocessing_threads,
+            initializer=_init_process_input_worker,
+            initargs=(process_input_partial,),
+        ) as pool:
+            list(tqdm(pool.imap(_process_input_in_worker, data), total=len(data)))
     else:
         for path in tqdm(data):
             process_input_partial(path)
@@ -1023,8 +1051,11 @@ def cli() -> None:
 @click.option(
     "--preprocessing-threads",
     type=int,
-    help="The number of threads to use for preprocessing. Default is 1.",
-    default=multiprocessing.cpu_count(),
+    help=(
+        "The number of processes to use for preprocessing. Default is the "
+        "number of CPUs this job may use."
+    ),
+    default=available_cpus(),
 )
 @click.option(
     "--affinity_mw_correction",
@@ -1465,8 +1496,10 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         )
 
 
-# boltz pointprobe runs boltz predict once per residue, with its options
+# boltz pointprobe and boltz screen run boltz predict on many inputs made from
+# one, once per residue or per ligand, with its options
 cli.add_command(make_pointprobe_command(predict, compute_msa))
+cli.add_command(make_screen_command(predict, compute_msa))
 
 
 if __name__ == "__main__":
