@@ -1,0 +1,86 @@
+# Screen
+
+`boltz screen` predicts a complex with each ligand of a list: the same protein, one ligand at a time. It tabulates the confidence of each prediction and, when requested, its affinity.
+
+It is faster than running `boltz predict` once per ligand:
+
+* **One MSA.** The MSA is computed once, and every prediction uses it.
+* **One model load.** All the predictions run in a single `boltz predict` run, so the model is loaded once, and so is the affinity model.
+
+## Input
+
+The input is a YAML template in the usual [prediction format](prediction.md), with one ligand entry. For each ligand of the list, screen replaces that entry's SMILES and keeps everything else, such as a pocket constraint on the ligand or an affinity property:
+
+```yaml
+sequences:
+  - protein:
+      id: A
+      sequence: MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG
+  - ligand:
+      id: L
+      smiles: C              # replaced by each ligand of the list
+constraints:                 # optional: holds every ligand in the same pocket
+  - pocket:
+      binder: L
+      contacts: [[A, 42], [A, 44], [A, 68]]
+properties:                  # optional: predicts every ligand's affinity (Boltz-2)
+  - affinity:
+      binder: L
+```
+
+When the template has several ligand entries, choose the one to replace with `--ligand`.
+
+The ligand list is either a `.smi` or `.txt` file, with a SMILES and optionally a name on each line:
+
+```
+Nc1ccc(cc1)C(=O)O     aminobenzoate
+CC(=O)Oc1ccccc1C(=O)O aspirin
+c1ccc2[nH]ccc2c1
+```
+
+or a `.csv` file with a `smiles` column and optionally a `name` column. A ligand without a name is called `lig_001`, `lig_002`, and so on. Names become folder names, so characters other than letters, digits, `_` and `-` are replaced with `_`, and repeated names get `_2`, `_3`. Every SMILES is checked with RDKit before anything runs: ligands it cannot read are listed and skipped.
+
+## Usage
+
+```bash
+boltz screen template.yaml --ligands ligands.smi --use_msa_server
+boltz screen template.yaml --ligands ligands.csv --use_msa_server --diffusion_samples 5 --devices 4
+```
+
+`boltz screen` takes every option of `boltz predict`, plus:
+
+| **Option** | **Type** | **Default** | **Description** |
+|---|---|---|---|
+| `--ligands` | `PATH` | required | The ligand list: `.smi`, `.txt` or `.csv`. |
+| `--ligand` | `TEXT` | the template's only ligand | The template's ligand chain to replace. |
+
+## Output
+
+```
+out_dir/boltz_results_[template]_screen/
+├── screen_summary.csv              # One row per structure, see below
+├── screen_inputs/                  # The input written for each ligand
+├── msa/                            # The MSA, computed once
+├── predictions/
+    ├── aminobenzoate/              # The usual prediction output for each ligand
+    ├── aspirin/
+    ...
+└── processed/
+```
+
+`screen_summary.csv` has one row per structure:
+
+| **Column** | **Description** |
+|---|---|
+| `ligand`, `smiles` | The ligand |
+| `model` | The model rank within that ligand's predictions |
+| `structure` | The structure file, in its prediction folder |
+| `min_distance`, `max_contact_distance`, `com_distance`, `ca_com_distance`, `within_max_distance` | When the template has a pocket constraint on the ligand: how close the ligand came to the pocket's residues, as in [pointprobe](pointprobe.md) |
+| `confidence_score`, `ptm`, `iptm`, `ligand_iptm`, ... | The scores from the structure's confidence file |
+| `affinity_pred_value`, `affinity_probability_binary` | The affinity, when the template requests it |
+
+## Notes
+
+* Rerunning the same command resumes: ligands already predicted are skipped, and the MSA is reused.
+* Boltz reuses an input it has processed before, by name. Screen therefore refuses a ligand whose SMILES changed since the last run into the same `--out_dir`: rename it or use a new `--out_dir`.
+* Affinity is only predicted by Boltz-2. With `--model boltz1`, the template cannot request it, and may have at most one pocket constraint, at 6 Angstrom.
