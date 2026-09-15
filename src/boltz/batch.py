@@ -42,6 +42,23 @@ DISTANCE_FIELDS = (*DISTANCES, "within_max_distance")
 SMILES_FIELDS = ("input_smiles", "predicted_smiles", "matches_input")
 STRUCTURE_SUFFIXES = {"mae": ".mae", "dms": ".dms", "pdb": ".pdb", "mmcif": ".cif"}
 DEFAULT_MAX_DISTANCE = 6.0
+GUIDANCE_WEIGHTS = (
+    "bond_guidance_weight",
+    "chiral_guidance_weight",
+    "stereo_bond_guidance_weight",
+)
+
+
+def check_guidance_weights(options: dict) -> None:
+    """Refuse guidance weights without --use_potentials, rather than ignore them.
+
+    They set the step size of the potentials' guidance, which only runs with
+    --use_potentials; checked before any MSA or preprocessing.
+    """
+    given = [f"--{name}" for name in GUIDANCE_WEIGHTS if options.get(name) is not None]
+    if given and not options.get("use_potentials"):
+        msg = f"{', '.join(given)} only apply with --use_potentials."
+        raise click.UsageError(msg)
 
 
 def chain_ids(entry: dict) -> list[str]:

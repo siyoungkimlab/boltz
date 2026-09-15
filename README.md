@@ -58,6 +58,7 @@ To update, run `git pull` in the clone, which an editable install picks up. For 
 * **MAE and DMS output.** `--output_format mae` (the default) and `dms` write every bond with its order and every atom with its formal charge, which PDB and mmCIF drop, with protein residues in their pH 7 states. Each structure also carries its confidence scores. See [prediction](docs/prediction.md).
 * **Timing.** Each prediction writes a `timing_[input].json` with how long each stage took: the MSA server, model loading, the pairformer, diffusion, and so on.
 * **A copy of the input.** Each prediction folder keeps a copy of the input file it was predicted from.
+* **Guidance weights.** `--bond_guidance_weight`, `--chiral_guidance_weight` and `--stereo_bond_guidance_weight` set how strongly `--use_potentials` enforces bond constraints, stereocenters and double bond geometry. See [prediction](docs/prediction.md).
 * **Faster on CPU.** On CPU, Boltz-2 runs in fp32 rather than bf16, which is several times faster there.
 
 ## Inference

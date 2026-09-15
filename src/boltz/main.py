@@ -22,6 +22,7 @@ from rdkit import Chem
 from tqdm import tqdm
 
 from boltz.atomname import atomname
+from boltz.batch import check_guidance_weights
 from boltz.data import const
 from boltz.data.module.inference import BoltzInferenceDataModule
 from boltz.data.module.inferencev2 import Boltz2InferenceDataModule
@@ -165,6 +166,10 @@ class BoltzSteeringParams:
     physical_guidance_update: bool = False
     contact_guidance_update: bool = True
     num_gd_steps: int = 20
+    # Guidance step sizes of the potentials --use_potentials turns on.
+    bond_guidance_weight: float = 0.15
+    chiral_guidance_weight: float = 0.1
+    stereo_bond_guidance_weight: float = 0.05
 
 
 @rank_zero_only
@@ -1038,6 +1043,33 @@ def cli() -> None:
     help="Whether to use potentials for steering. Default is False.",
 )
 @click.option(
+    "--bond_guidance_weight",
+    type=click.FloatRange(min=0),
+    default=None,
+    help=(
+        "With --use_potentials, how strongly guidance pulls the atoms of each "
+        "bond constraint to within 2 A of each other. Default is 0.15."
+    ),
+)
+@click.option(
+    "--chiral_guidance_weight",
+    type=click.FloatRange(min=0),
+    default=None,
+    help=(
+        "With --use_potentials, how strongly guidance keeps each stereocenter "
+        "as the input specifies it. Default is 0.1."
+    ),
+)
+@click.option(
+    "--stereo_bond_guidance_weight",
+    type=click.FloatRange(min=0),
+    default=None,
+    help=(
+        "With --use_potentials, how strongly guidance keeps each double bond's "
+        "E/Z geometry as the input specifies it. Default is 0.05."
+    ),
+)
+@click.option(
     "--model",
     default="boltz2",
     type=click.Choice(["boltz1", "boltz2"]),
@@ -1138,6 +1170,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     api_key_header: Optional[str] = None,
     api_key_value: Optional[str] = None,
     use_potentials: bool = False,
+    bond_guidance_weight: Optional[float] = None,
+    chiral_guidance_weight: Optional[float] = None,
+    stereo_bond_guidance_weight: Optional[float] = None,
     model: Literal["boltz1", "boltz2"] = "boltz2",
     method: Optional[str] = None,
     affinity_mw_correction: Optional[bool] = False,
@@ -1149,6 +1184,15 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     write_embeddings: bool = False,
 ) -> None:
     """Run predictions with Boltz."""
+    check_guidance_weights(
+        {
+            "use_potentials": use_potentials,
+            "bond_guidance_weight": bond_guidance_weight,
+            "chiral_guidance_weight": chiral_guidance_weight,
+            "stereo_bond_guidance_weight": stereo_bond_guidance_weight,
+        }
+    )
+
     # If cpu, write a friendly warning
     if accelerator == "cpu":
         msg = "Running on CPU, this will be slow. Consider using a GPU."
@@ -1388,6 +1432,12 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args = BoltzSteeringParams()
         steering_args.fk_steering = use_potentials
         steering_args.physical_guidance_update = use_potentials
+        if bond_guidance_weight is not None:
+            steering_args.bond_guidance_weight = bond_guidance_weight
+        if chiral_guidance_weight is not None:
+            steering_args.chiral_guidance_weight = chiral_guidance_weight
+        if stereo_bond_guidance_weight is not None:
+            steering_args.stereo_bond_guidance_weight = stereo_bond_guidance_weight
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
         load_start = time.perf_counter()

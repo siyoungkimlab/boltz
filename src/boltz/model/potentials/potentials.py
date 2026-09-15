@@ -701,7 +701,9 @@ def get_potentials(steering_args, boltz2=False):
                 ConnectionsPotential(
                     parameters={
                         "guidance_interval": 1,
-                        "guidance_weight": 0.15
+                        "guidance_weight": steering_args.get(
+                            "bond_guidance_weight", 0.15
+                        )
                         if steering_args["physical_guidance_update"]
                         else 0.0,
                         "resampling_weight": 1.0,
@@ -723,7 +725,9 @@ def get_potentials(steering_args, boltz2=False):
                 ChiralAtomPotential(
                     parameters={
                         "guidance_interval": 1,
-                        "guidance_weight": 0.1
+                        "guidance_weight": steering_args.get(
+                            "chiral_guidance_weight", 0.1
+                        )
                         if steering_args["physical_guidance_update"]
                         else 0.0,
                         "resampling_weight": 1.0,
@@ -733,7 +737,9 @@ def get_potentials(steering_args, boltz2=False):
                 StereoBondPotential(
                     parameters={
                         "guidance_interval": 1,
-                        "guidance_weight": 0.05
+                        "guidance_weight": steering_args.get(
+                            "stereo_bond_guidance_weight", 0.05
+                        )
                         if steering_args["physical_guidance_update"]
                         else 0.0,
                         "resampling_weight": 1.0,
