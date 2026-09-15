@@ -21,6 +21,9 @@ import numpy as np
 import yaml
 from rdkit import Chem
 
+from boltz.atomname import heavy_atom_names
+from boltz.data import const
+
 CONFIDENCE_SCORES = (
     "confidence_score",
     "ptm",
@@ -320,3 +323,82 @@ def write_csv(path: Path, rows: list[dict], fields: list[str]) -> Path:
         writer.writeheader()
         writer.writerows(rows)
     return path
+
+
+_LETTER_TO_RESIDUE = {
+    "protein": const.prot_letter_to_token,
+    "dna": const.dna_letter_to_token,
+    "rna": const.rna_letter_to_token,
+}
+
+
+def _bond_atom_problem(  # noqa: PLR0911
+    spec: object, entries: dict[str, tuple[str, dict]], affinity_binders: set[str]
+) -> Optional[str]:
+    """Say what is wrong with one atom of a bond constraint, if anything."""
+    if not isinstance(spec, list) or len(spec) != 3:  # noqa: PLR2004
+        return "expected [CHAIN, RESIDUE, ATOM]"
+    chain, resid, name = str(spec[0]), spec[1], str(spec[2])
+    if chain not in entries:
+        return f"there is no chain {chain}"
+    kind, entry = entries[chain]
+
+    if kind == "ligand":
+        if resid != 1:
+            return f"a ligand is residue 1, not {resid}"
+        if "smiles" not in entry:
+            return None  # a CCD ligand's atoms are left to Boltz
+        names = heavy_atom_names(str(entry["smiles"]), chain in affinity_binders)
+        if name not in names:
+            return (
+                f"ligand {chain} has no atom {name}; its atoms are "
+                f"{' '.join(names)} (see boltz atomname)"
+            )
+        return None
+
+    sequence = str(entry.get("sequence", ""))
+    if not isinstance(resid, int) or not 1 <= resid <= len(sequence):
+        return f"chain {chain} has residues 1-{len(sequence)}"
+    modified = {int(m["position"]) for m in entry.get("modifications") or []}
+    if resid in modified:
+        return None  # a modified residue's atoms are left to Boltz
+    residue = _LETTER_TO_RESIDUE.get(kind, {}).get(sequence[resid - 1])
+    atoms = const.ref_atoms.get(residue) if residue else None
+    if atoms is not None and name not in atoms:
+        return (
+            f"residue {resid} of chain {chain} is {residue}, which has no atom "
+            f"{name}; it has {' '.join(atoms)}"
+        )
+    return None
+
+
+def check_bonds(schema: dict) -> None:
+    """Check that every bond constraint's atoms exist, before running.
+
+    A misnamed atom would otherwise fail every input in preprocessing. A SMILES
+    ligand's atoms are checked against the names Boltz gives it, and a
+    residue's against its standard atoms; the atoms of CCD ligands and of
+    modified residues are left to Boltz.
+    """
+    entries = {
+        chain: (kind, entry)
+        for item in schema["sequences"]
+        for kind, entry in item.items()
+        for chain in chain_ids(entry)
+    }
+    affinity_binders = {
+        str(prop["affinity"]["binder"])
+        for prop in schema.get("properties") or []
+        if "affinity" in prop
+    }
+    problems = []
+    for constraint in schema.get("constraints") or []:
+        if "bond" not in constraint:
+            continue
+        for key in ("atom1", "atom2"):
+            spec = constraint["bond"].get(key)
+            problem = _bond_atom_problem(spec, entries, affinity_binders)
+            if problem:
+                problems.append(f"bond {key} {spec}: {problem}")
+    if problems:
+        raise click.UsageError("\n".join(problems))

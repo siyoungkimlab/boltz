@@ -21,6 +21,7 @@ from pytorch_lightning.utilities import rank_zero_only
 from rdkit import Chem
 from tqdm import tqdm
 
+from boltz.atomname import atomname
 from boltz.data import const
 from boltz.data.module.inference import BoltzInferenceDataModule
 from boltz.data.module.inferencev2 import Boltz2InferenceDataModule
@@ -1500,6 +1501,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
 # one, once per residue or per ligand, with its options
 cli.add_command(make_pointprobe_command(predict, compute_msa))
 cli.add_command(make_screen_command(predict, compute_msa))
+cli.add_command(atomname)
 
 
 if __name__ == "__main__":

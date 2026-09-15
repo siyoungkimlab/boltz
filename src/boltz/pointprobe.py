@@ -24,6 +24,7 @@ from boltz.batch import (
     DISTANCE_FIELDS,
     all_chain_ids,
     chains_of_kind,
+    check_bonds,
     distance_columns,
     predicted_models,
     read_affinity,
@@ -291,6 +292,7 @@ def make_pointprobe_command(
         if binder not in all_chain_ids(schema):
             msg = f"The binder {binder} is not a chain of the input."
             raise click.UsageError(msg)
+        check_bonds(schema)
         chains = chains_of_kind(schema, "protein")
         targets = parse_probe(spec, chains, binder)
         if not targets:

@@ -22,6 +22,7 @@ from boltz.batch import (
     DEFAULT_MAX_DISTANCE,
     DISTANCE_FIELDS,
     chain_ids,
+    check_bonds,
     distance_columns,
     predicted_models,
     read_affinity,
@@ -174,6 +175,25 @@ def check_constraints(schema: dict, ligand_id: str, model: str) -> Optional[dict
     return next((p for p in pockets if str(p["binder"]) == ligand_id), None)
 
 
+def check_screen_bonds(schema: dict, ligand_id: str) -> None:
+    """Refuse a bond to the screened ligand, then check the other bonds.
+
+    Each ligand names its atoms differently, so one bond constraint cannot
+    name the same atom in all of them.
+    """
+    for constraint in schema.get("constraints") or []:
+        bond = constraint.get("bond") or {}
+        chains = {str((bond.get(key) or [None])[0]) for key in ("atom1", "atom2")}
+        if ligand_id in chains:
+            msg = (
+                f"A bond to the screened ligand {ligand_id} cannot be screened: "
+                "each ligand names its atoms differently, so one bond constraint "
+                "cannot name the same atom in all of them."
+            )
+            raise click.UsageError(msg)
+    check_bonds(schema)
+
+
 def check_renamed(inputs_dir: Path, ligands: list[Ligand], index: int) -> None:
     """Refuse a ligand name whose SMILES changed since the last run here.
 
@@ -271,6 +291,7 @@ def make_screen_command(predict: click.Command, compute_msa: Callable) -> click.
         schema = yaml.safe_load(data.read_text())
         index, ligand_id = find_ligand_entry(schema, ligand_choice)
         pocket = check_constraints(schema, ligand_id, str(options["model"]))
+        check_screen_bonds(schema, ligand_id)
 
         ligands, invalid = split_valid(name_ligands(read_ligands(ligands_path)))
         for ligand in invalid:

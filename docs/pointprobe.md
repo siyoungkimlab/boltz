@@ -87,3 +87,4 @@ out_dir/boltz_results_[input]_pointprobe/
 * Rerunning the same command resumes: residues already predicted are skipped, and the MSA is reused.
 * Probing different residues into an existing output folder also predicts any residues left unfinished from before; use a new `--out_dir` to keep runs apart.
 * Boltz-1 supports one pocket constraint, at 6 Angstrom: with `--model boltz1`, the input cannot have other pocket constraints or another `max_distance`.
+* A bond constraint, such as a covalent ligand's, is kept in every input. Its atoms are checked before running: a SMILES ligand's against the names Boltz gives it (see `boltz atomname`), a residue's against its standard atoms.

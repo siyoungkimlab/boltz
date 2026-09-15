@@ -84,3 +84,4 @@ out_dir/boltz_results_[template]_screen/
 * Rerunning the same command resumes: ligands already predicted are skipped, and the MSA is reused.
 * Boltz reuses an input it has processed before, by name. Screen therefore refuses a ligand whose SMILES changed since the last run into the same `--out_dir`: rename it or use a new `--out_dir`.
 * Affinity is only predicted by Boltz-2. With `--model boltz1`, the template cannot request it, and may have at most one pocket constraint, at 6 Angstrom.
+* A bond constraint to the screened ligand is refused: each ligand names its atoms differently, so one constraint cannot name the same atom in all of them. Other bonds, such as a disulfide, are kept, and their atoms are checked before running.
