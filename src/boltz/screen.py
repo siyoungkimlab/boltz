@@ -18,11 +18,14 @@ import yaml
 from rdkit import Chem, RDLogger
 
 from boltz.batch import (
+    BOND_FIELDS,
     CONFIDENCE_SCORES,
     DEFAULT_MAX_DISTANCE,
     DISTANCE_FIELDS,
     SMILES_FIELDS,
     affinity_binders,
+    bond_columns,
+    bond_constraints,
     chain_ids,
     check_bonds,
     check_guidance_weights,
@@ -228,6 +231,7 @@ def write_summary(
     output_format: str,
     *,
     affinity_binder: bool = False,
+    bonds: Optional[list] = None,
 ) -> Path:
     """Tabulate every structure: its ligand, its SMILES, pocket distances and scores."""
     contacts = (
@@ -258,12 +262,16 @@ def write_summary(
                 row.update(
                     distance_columns(structure, ligand_id, contacts, max_distance)
                 )
+            if bonds:
+                row.update(bond_columns(structure, bonds))
             row.update(score_columns(confidence, affinity))
             rows.append(row)
 
     fields = ["ligand", "model", "structure", *SMILES_FIELDS]
     if contacts:
         fields += DISTANCE_FIELDS
+    if bonds:
+        fields += BOND_FIELDS
     fields += CONFIDENCE_SCORES
     return write_csv(results / "screen_summary.csv", rows, fields)
 
@@ -339,6 +347,7 @@ def make_screen_command(predict: click.Command, compute_msa: Callable) -> click.
             pocket,
             str(options["output_format"]),
             affinity_binder=ligand_id in affinity_binders(schema),
+            bonds=bond_constraints(schema),
         )
         click.echo(f"Screen summary written to {summary}.")
 

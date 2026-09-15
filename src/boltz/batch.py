@@ -40,6 +40,13 @@ AFFINITY_SCORES = ("affinity_pred_value", "affinity_probability_binary")
 DISTANCES = ("min_distance", "max_contact_distance", "com_distance", "ca_com_distance")
 DISTANCE_FIELDS = (*DISTANCES, "within_max_distance")
 SMILES_FIELDS = ("input_smiles", "predicted_smiles", "matches_input")
+BOND_FIELDS = ("bond_length", "bond_neighbor_max", "bond_intact")
+# A single bond is about as long as the sum of its atoms' covalent radii
+# (C-S 1.81 A). A constrained bond may differ from that by BOND_TOLERANCE;
+# its atoms' other bonds, some double and so shorter, may be longer than it
+# by at most NEIGHBOR_STRETCH.
+BOND_TOLERANCE = 0.2
+NEIGHBOR_STRETCH = 0.3
 STRUCTURE_SUFFIXES = {"mae": ".mae", "dms": ".dms", "pdb": ".pdb", "mmcif": ".cif"}
 DEFAULT_MAX_DISTANCE = 6.0
 GUIDANCE_WEIGHTS = (
@@ -181,6 +188,7 @@ class StructureAtom(NamedTuple):
     name: str
     mass: float
     xyz: np.ndarray
+    atomic_number: int = 0
 
 
 def _mae_rows(text: str, table: str) -> list[dict[str, str]]:
@@ -202,13 +210,15 @@ def read_atoms(path: Path) -> list[StructureAtom]:
         con = sqlite3.connect(path)
         try:
             rows = con.execute(
-                "select chain, resid, name, mass, x, y, z from particle"
+                "select chain, resid, name, mass, x, y, z, anum from particle"
             ).fetchall()
         finally:
             con.close()
         return [
-            StructureAtom(str(c), int(r), str(n).strip(), float(m), np.array(xyz))
-            for c, r, n, m, *xyz in rows
+            StructureAtom(
+                str(c), int(r), str(n).strip(), float(m), np.array(xyz), int(z)
+            )
+            for c, r, n, m, *xyz, z in rows
         ]
 
     if path.suffix == ".mae":
@@ -225,6 +235,7 @@ def read_atoms(path: Path) -> list[StructureAtom]:
                     if atomic_number
                     else 0.0,
                     np.array([float(row[f"r_m_{axis}_coord"]) for axis in "xyz"]),
+                    atomic_number,
                 )
             )
         return atoms
@@ -237,6 +248,7 @@ def read_atoms(path: Path) -> list[StructureAtom]:
             atom.name,
             atom.element.weight,
             np.array(atom.pos.tolist()),
+            atom.element.atomic_number,
         )
         for chain in structure[0]
         for residue in chain
@@ -467,6 +479,123 @@ def ligand_smiles_columns(
         return row
     row["predicted_smiles"] = Chem.MolToSmiles(predicted)
     row["matches_input"] = _matches_input(reference, predicted)
+    return row
+
+
+def bond_constraints(schema: dict) -> list[tuple[tuple[str, int, str], ...]]:
+    """Return the input's bond constraints, each as two (chain, residue, atom)."""
+    bonds = []
+    for constraint in schema.get("constraints") or []:
+        bond = constraint.get("bond") or {}
+        if "atom1" in bond and "atom2" in bond:
+            bonds.append(
+                tuple(
+                    (str(spec[0]), int(spec[1]), str(spec[2]))
+                    for spec in (bond["atom1"], bond["atom2"])
+                )
+            )
+    return bonds
+
+
+def _read_bonded(path: Path) -> Optional[tuple[dict, list[tuple[int, int]]]]:
+    """Read a MAE or DMS structure's atoms by id, and its bonds as id pairs."""
+    if path.suffix == ".dms":
+        con = sqlite3.connect(path)
+        try:
+            rows = con.execute(
+                "select id, chain, resid, name, x, y, z, anum from particle"
+            ).fetchall()
+            bonds = con.execute("select p0, p1 from bond").fetchall()
+        finally:
+            con.close()
+        atoms = {
+            int(i): StructureAtom(
+                str(c), int(r), str(n).strip(), 0.0, np.array(xyz, dtype=float), int(z)
+            )
+            for i, c, r, n, *xyz, z in rows
+        }
+        return atoms, [(int(a), int(b)) for a, b in bonds]
+    if path.suffix == ".mae":
+        text = path.read_text()
+        atoms = {
+            int(row["index"]): StructureAtom(
+                row["s_m_chain_name"],
+                int(row["i_m_residue_number"]),
+                row["s_m_pdb_atom_name"].strip(),
+                0.0,
+                np.array([float(row[f"r_m_{axis}_coord"]) for axis in "xyz"]),
+                int(row["i_m_atomic_number"]),
+            )
+            for row in _mae_rows(text, "m_atom")
+        }
+        bonds = [
+            (int(row["i_m_from"]), int(row["i_m_to"]))
+            for row in _mae_rows(text, "m_bond")
+        ]
+        return atoms, bonds
+    return None
+
+
+def _single_bond_length(atom_1: StructureAtom, atom_2: StructureAtom) -> float:
+    """Return the length of a single bond between two atoms: their covalent radii."""
+    table = Chem.GetPeriodicTable()
+    return table.GetRcovalent(atom_1.atomic_number) + table.GetRcovalent(
+        atom_2.atomic_number
+    )
+
+
+def bond_columns(
+    structure: Optional[Path], bonds: list[tuple[tuple[str, int, str], ...]]
+) -> dict:
+    """Return how intact each bond constraint came out, for a summary row.
+
+    ``bond_length`` is the distance between the two constrained atoms, one per
+    bond constraint. A potential can pull those two atoms together without the
+    model placing the molecules, stretching their other bonds instead, so
+    ``bond_neighbor_max`` is the longest bond from either atom to the rest of
+    its own molecule, read from the MAE or DMS bond table (blank for PDB and
+    mmCIF). ``bond_intact`` holds when each constrained bond is within
+    ``BOND_TOLERANCE`` of a single bond between its elements, and no other bond
+    of its atoms is longer than a single bond by more than ``NEIGHBOR_STRETCH``.
+    """
+    row = dict.fromkeys(BOND_FIELDS, "")
+    if structure is None or not bonds:
+        return row
+
+    bonded = _read_bonded(structure)
+    if bonded is None:
+        atoms = {(a.chain, a.resid, a.name): a for a in read_atoms(structure)}
+        ids, pairs = None, []
+    else:
+        by_id, pairs = bonded
+        ids = {(a.chain, a.resid, a.name): i for i, a in by_id.items()}
+        atoms = {key: by_id[i] for key, i in ids.items()}
+
+    lengths, neighbor_lengths, intact = [], [], True
+    for key_1, key_2 in bonds:
+        if key_1 not in atoms or key_2 not in atoms:
+            return row
+        atom_1, atom_2 = atoms[key_1], atoms[key_2]
+        length = float(np.linalg.norm(atom_1.xyz - atom_2.xyz))
+        lengths.append(length)
+        intact &= abs(length - _single_bond_length(atom_1, atom_2)) <= BOND_TOLERANCE
+        if ids is None:
+            continue
+        ends = {ids[key_1], ids[key_2]}
+        for a, b in pairs:
+            if {a, b} == ends or not {a, b} & ends:
+                continue
+            neighbor = float(np.linalg.norm(by_id[a].xyz - by_id[b].xyz))
+            neighbor_lengths.append(neighbor)
+            intact &= (
+                neighbor <= _single_bond_length(by_id[a], by_id[b]) + NEIGHBOR_STRETCH
+            )
+
+    row["bond_length"] = ";".join(f"{length:.3f}" for length in lengths)
+    row["bond_neighbor_max"] = (
+        round(max(neighbor_lengths), 3) if neighbor_lengths else ""
+    )
+    row["bond_intact"] = bool(intact)
     return row
 
 
