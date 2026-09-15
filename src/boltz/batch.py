@@ -20,8 +20,9 @@ import gemmi
 import numpy as np
 import yaml
 from rdkit import Chem
+from rdkit.Geometry import Point3D
 
-from boltz.atomname import heavy_atom_names
+from boltz.atomname import boltz_atom_names, heavy_atom_names, named_smiles
 from boltz.data import const
 
 CONFIDENCE_SCORES = (
@@ -38,6 +39,7 @@ CONFIDENCE_SCORES = (
 AFFINITY_SCORES = ("affinity_pred_value", "affinity_probability_binary")
 DISTANCES = ("min_distance", "max_contact_distance", "com_distance", "ca_com_distance")
 DISTANCE_FIELDS = (*DISTANCES, "within_max_distance")
+SMILES_FIELDS = ("input_smiles", "predicted_smiles", "matches_input")
 STRUCTURE_SUFFIXES = {"mae": ".mae", "dms": ".dms", "pdb": ".pdb", "mmcif": ".cif"}
 DEFAULT_MAX_DISTANCE = 6.0
 
@@ -66,6 +68,15 @@ def all_chain_ids(schema: dict) -> set[str]:
         for item in schema["sequences"]
         for entry in item.values()
         for chain in chain_ids(entry)
+    }
+
+
+def affinity_binders(schema: dict) -> set[str]:
+    """Return the chain ids of the input's affinity binders."""
+    return {
+        str(prop["affinity"]["binder"])
+        for prop in schema.get("properties") or []
+        if "affinity" in prop
     }
 
 
@@ -155,6 +166,19 @@ class StructureAtom(NamedTuple):
     xyz: np.ndarray
 
 
+def _mae_rows(text: str, table: str) -> list[dict[str, str]]:
+    """Read the rows of one table of a Boltz MAE file, such as ``m_atom``."""
+    if f" {table}[" not in text:
+        return []
+    block = text.split(f" {table}[", 1)[1].split(":::\n")
+    columns = [c.strip() for c in block[0].splitlines()[1:] if c.strip()]
+    return [
+        dict(zip(["index", *columns], shlex.split(line)))
+        for line in block[1].splitlines()
+        if line.strip()
+    ]
+
+
 def read_atoms(path: Path) -> list[StructureAtom]:
     """Read every atom of a predicted structure, in any output format."""
     if path.suffix == ".dms":
@@ -172,13 +196,8 @@ def read_atoms(path: Path) -> list[StructureAtom]:
 
     if path.suffix == ".mae":
         periodic_table = Chem.GetPeriodicTable()
-        block = path.read_text().split(" m_atom[")[1].split(":::\n")
-        columns = [c.strip() for c in block[0].splitlines()[1:] if c.strip()]
         atoms = []
-        for line in block[1].splitlines():
-            if not line.strip():
-                continue
-            row = dict(zip(["index", *columns], shlex.split(line)))
+        for row in _mae_rows(path.read_text(), "m_atom"):
             atomic_number = int(row["i_m_atomic_number"])
             atoms.append(
                 StructureAtom(
@@ -279,6 +298,158 @@ def distance_columns(
         if row["max_contact_distance"] == ""
         else row["max_contact_distance"] <= max_distance
     )
+    return row
+
+
+_BOND_TYPES = {
+    1: Chem.BondType.SINGLE,
+    2: Chem.BondType.DOUBLE,
+    3: Chem.BondType.TRIPLE,
+}
+
+
+def read_ligand(path: Path, chain: str) -> Optional[Chem.Mol]:
+    """Read one chain of a MAE or DMS structure as a molecule, in 3D.
+
+    These formats keep every atom's formal charge and every bond's order, so the
+    molecule is the chemistry the file holds; the hydrogens, which the output
+    leaves out, are implicit. Its stereochemistry is read from the coordinates.
+    Returns None for other formats, or if RDKit cannot sanitize the molecule.
+    """
+    if path.suffix == ".dms":
+        con = sqlite3.connect(path)
+        try:
+            atoms = con.execute(
+                "select id, name, anum, formal_charge, x, y, z from particle "
+                "where chain = ? order by id",
+                (chain,),
+            ).fetchall()
+            bonds = con.execute('select p0, p1, "order" from bond').fetchall()
+        finally:
+            con.close()
+    elif path.suffix == ".mae":
+        text = path.read_text()
+        atoms = [
+            (
+                int(row["index"]),
+                row["s_m_pdb_atom_name"],
+                int(row["i_m_atomic_number"]),
+                int(row["i_m_formal_charge"]),
+                *(float(row[f"r_m_{axis}_coord"]) for axis in "xyz"),
+            )
+            for row in _mae_rows(text, "m_atom")
+            if row["s_m_chain_name"] == chain
+        ]
+        bonds = [
+            (int(row["i_m_from"]), int(row["i_m_to"]), int(row["i_m_order"]))
+            for row in _mae_rows(text, "m_bond")
+        ]
+    else:
+        return None
+    if not atoms:
+        return None
+
+    mol = Chem.RWMol()
+    conformer = Chem.Conformer(len(atoms))
+    index = {}  # file atom id -> molecule atom index
+    for file_id, name, atomic_number, charge, *xyz in atoms:
+        atom = Chem.Atom(int(atomic_number))
+        atom.SetFormalCharge(int(charge))
+        atom.SetProp("name", str(name).strip())
+        index[file_id] = mol.AddAtom(atom)
+        conformer.SetAtomPosition(index[file_id], Point3D(*(float(c) for c in xyz)))
+    for atom_1, atom_2, order in bonds:
+        if atom_1 in index and atom_2 in index:
+            mol.AddBond(
+                index[atom_1],
+                index[atom_2],
+                _BOND_TYPES.get(int(order), Chem.BondType.SINGLE),
+            )
+    mol = mol.GetMol()
+    try:
+        Chem.SanitizeMol(mol)
+    except (ValueError, RuntimeError):
+        return None
+    mol.AddConformer(conformer, assignId=True)
+    Chem.AssignStereochemistryFrom3D(mol)
+    return mol
+
+
+def _placed_on_input(reference: Chem.Mol, path: Path, chain: str) -> Optional[Chem.Mol]:
+    """Place the input's molecule on the predicted coordinates of its atoms.
+
+    For PDB and mmCIF, which do not keep bond orders or charges: the chemistry
+    is the input's, and only the stereochemistry comes from the prediction.
+    """
+    positions = {
+        atom.name: atom.xyz for atom in read_atoms(path) if atom.chain == chain
+    }
+    mol = Chem.Mol(reference)
+    mol.RemoveAllConformers()
+    conformer = Chem.Conformer(mol.GetNumAtoms())
+    for atom in mol.GetAtoms():
+        xyz = positions.get(atom.GetProp("name"))
+        if xyz is None:
+            return None
+        conformer.SetAtomPosition(atom.GetIdx(), Point3D(*(float(c) for c in xyz)))
+    mol.AddConformer(conformer, assignId=True)
+    Chem.AssignStereochemistryFrom3D(mol)
+    return mol
+
+
+def _matches_input(reference: Chem.Mol, predicted: Chem.Mol) -> bool:
+    """Whether the prediction is the input molecule, as far as the input says.
+
+    The same atoms, bonds and charges, and every stereocenter and double bond
+    geometry the input specifies; those it leaves unspecified are ignored.
+    Atoms are matched by the names Boltz gives them.
+    """
+    names = {atom.GetProp("name"): atom.GetIdx() for atom in predicted.GetAtoms()}
+    order = [names.get(atom.GetProp("name")) for atom in reference.GetAtoms()]
+    if None in order or len(order) != predicted.GetNumAtoms():
+        return False
+    check = Chem.RenumberAtoms(predicted, order)
+    for ref_atom in reference.GetAtoms():
+        if ref_atom.GetChiralTag() == Chem.ChiralType.CHI_UNSPECIFIED:
+            check.GetAtomWithIdx(ref_atom.GetIdx()).SetChiralTag(
+                Chem.ChiralType.CHI_UNSPECIFIED
+            )
+    for ref_bond in reference.GetBonds():
+        bond = check.GetBondBetweenAtoms(
+            ref_bond.GetBeginAtomIdx(), ref_bond.GetEndAtomIdx()
+        )
+        if bond is not None and ref_bond.GetStereo() == Chem.BondStereo.STEREONONE:
+            bond.SetStereo(Chem.BondStereo.STEREONONE)
+    return Chem.MolToSmiles(check) == Chem.MolToSmiles(reference)
+
+
+def ligand_smiles_columns(
+    structure: Optional[Path],
+    chain: str,
+    smiles: Optional[str],
+    affinity: bool = False,
+) -> dict:
+    """Return a ligand's input and predicted SMILES, and whether they agree.
+
+    From MAE and DMS, the predicted SMILES is the ligand as the file holds it:
+    its atoms, charges and bond orders, with stereochemistry from its predicted
+    coordinates. PDB and mmCIF keep no bond orders or charges, so there the
+    input's chemistry is placed on the predicted coordinates, matched by the
+    names Boltz gives the atoms. The affinity binder is compared as Boltz
+    standardizes it.
+    """
+    row = {"input_smiles": smiles or "", "predicted_smiles": "", "matches_input": ""}
+    if structure is None or not smiles:
+        return row
+    reference = Chem.RemoveHs(boltz_atom_names(named_smiles(smiles, affinity)))
+    if structure.suffix in (".mae", ".dms"):
+        predicted = read_ligand(structure, chain)
+    else:
+        predicted = _placed_on_input(reference, structure, chain)
+    if predicted is None:
+        return row
+    row["predicted_smiles"] = Chem.MolToSmiles(predicted)
+    row["matches_input"] = _matches_input(reference, predicted)
     return row
 
 
@@ -386,18 +557,14 @@ def check_bonds(schema: dict) -> None:
         for kind, entry in item.items()
         for chain in chain_ids(entry)
     }
-    affinity_binders = {
-        str(prop["affinity"]["binder"])
-        for prop in schema.get("properties") or []
-        if "affinity" in prop
-    }
+    binders = affinity_binders(schema)
     problems = []
     for constraint in schema.get("constraints") or []:
         if "bond" not in constraint:
             continue
         for key in ("atom1", "atom2"):
             spec = constraint["bond"].get(key)
-            problem = _bond_atom_problem(spec, entries, affinity_binders)
+            problem = _bond_atom_problem(spec, entries, binders)
             if problem:
                 problems.append(f"bond {key} {spec}: {problem}")
     if problems:

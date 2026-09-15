@@ -72,9 +72,12 @@ out_dir/boltz_results_[template]_screen/
 
 | **Column** | **Description** |
 |---|---|
-| `ligand`, `smiles` | The ligand |
+| `ligand` | The ligand's name |
 | `model` | The model rank within that ligand's predictions |
 | `structure` | The structure file, in its prediction folder |
+| `input_smiles` | The ligand's SMILES, as given |
+| `predicted_smiles` | The ligand's SMILES as predicted, with its stereochemistry read from the predicted coordinates. From MAE and DMS output it is the ligand exactly as the file holds it: its atoms, formal charges and bond orders. PDB and mmCIF keep no bond orders or charges, so there the input's chemistry is placed on the predicted coordinates. |
+| `matches_input` | Whether the predicted ligand is the input: the same atoms, bonds and charges, and every stereocenter and double bond geometry the input SMILES specifies (unspecified ones are ignored). For the affinity binder, compared with the SMILES as Boltz standardizes it, which neutralizes charges. |
 | `min_distance`, `max_contact_distance`, `com_distance`, `ca_com_distance`, `within_max_distance` | When the template has a pocket constraint on the ligand: how close the ligand came to the pocket's residues, as in [pointprobe](pointprobe.md) |
 | `confidence_score`, `ptm`, `iptm`, `ligand_iptm`, ... | The scores from the structure's confidence file |
 | `affinity_pred_value`, `affinity_probability_binary` | The affinity, when the template requests it |

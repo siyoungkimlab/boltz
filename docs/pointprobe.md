@@ -81,6 +81,9 @@ out_dir/boltz_results_[input]_pointprobe/
 | `contacts` | The residues of the pocket, e.g. `12-13` with `--window 2` |
 | `model` | The model rank within that residue's predictions |
 | `structure` | The structure file, in its prediction folder |
+| `input_smiles` | The probed ligand's SMILES, as given; blank for a CCD ligand or a protein binder |
+| `predicted_smiles` | The ligand's SMILES as predicted, with its stereochemistry read from the predicted coordinates. From MAE and DMS output it is the ligand exactly as the file holds it: its atoms, formal charges and bond orders. PDB and mmCIF keep no bond orders or charges, so there the input's chemistry is placed on the predicted coordinates. |
+| `matches_input` | Whether the predicted ligand is the input: the same atoms, bonds and charges, and every stereocenter and double bond geometry the input SMILES specifies (unspecified ones are ignored). For the affinity binder, compared with the SMILES as Boltz standardizes it, which neutralizes charges. |
 | `min_distance` | The shortest distance between any atom of the ligand and any atom of the pocket's residues, in Angstrom |
 | `max_contact_distance` | The ligand's closest approach to each pocket residue, taken at the residue it came least close to, in Angstrom. This is the distance a pocket constraint limits, since it holds for every residue; with `--window 1` it equals `min_distance`. |
 | `com_distance` | The distance between the centers of mass of the ligand and of the pocket's residues, in Angstrom |
