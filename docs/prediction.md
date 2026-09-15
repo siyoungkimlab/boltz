@@ -138,6 +138,8 @@ Examples of common options include:
 
   Three of these potentials can be made stronger or weaker, in both Boltz-1 and Boltz-2: `--bond_guidance_weight` (default 0.15) for `bond` constraints, `--chiral_guidance_weight` (0.1) for stereocenters, and `--stereo_bond_guidance_weight` (0.05) for double bond geometry. Each sets the step size of that potential's guidance, the nudges toward satisfying it during sampling; 0 turns its guidance off, though it still counts when Boltz picks among its parallel candidates. They need `--use_potentials`.
 
+  These weights only nudge the atoms they name toward a better geometry; they do not move a molecule the model has placed elsewhere. A stronger `--bond_guidance_weight` pulls just the two bonded atoms together, so if the model has not placed the ligand at its partner residue, raising it stretches the neighbouring bonds of both instead (for example the cysteine's CB-SG bond), and very high values can make the guidance unstable. Check the geometry around the bond, not only the bond length.
+
 * To predict a structure using 10 recycling steps and 25 samples (the default parameters for AlphaFold3) use (note however that the prediction will take significantly longer): `--recycling_steps 10 --diffusion_samples 25`
 
 
