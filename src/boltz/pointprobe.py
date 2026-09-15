@@ -22,10 +22,13 @@ from boltz.batch import (
     CONFIDENCE_SCORES,
     DEFAULT_MAX_DISTANCE,
     DISTANCE_FIELDS,
+    SMILES_FIELDS,
+    affinity_binders,
     all_chain_ids,
     chains_of_kind,
     check_bonds,
     distance_columns,
+    ligand_smiles_columns,
     predicted_models,
     read_affinity,
     results_paths,
@@ -206,8 +209,11 @@ def write_summary(
     chains: dict[str, dict],
     template: dict,
     output_format: str,
+    *,
+    ligand_smiles: Optional[str] = None,
+    affinity_binder: bool = False,
 ) -> Path:
-    """Tabulate every structure: its probed residue, distances and scores."""
+    """Tabulate every structure: its probed residue, SMILES, distances and scores."""
     binder = str(template["binder"])
     max_distance = float(template.get("max_distance", DEFAULT_MAX_DISTANCE))
 
@@ -227,6 +233,9 @@ def write_summary(
                 "model": model,
                 "structure": structure.name if structure else "",
             }
+            row.update(
+                ligand_smiles_columns(structure, binder, ligand_smiles, affinity_binder)
+            )
             row.update(distance_columns(structure, binder, contacts, max_distance))
             row.update(score_columns(confidence, affinity))
             rows.append(row)
@@ -238,6 +247,7 @@ def write_summary(
         "contacts",
         "model",
         "structure",
+        *SMILES_FIELDS,
         *DISTANCE_FIELDS,
         *CONFIDENCE_SCORES,
     ]
@@ -368,8 +378,15 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
 
         run_predict(predict, options, inputs_dir)
 
+        binder_entry = chains_of_kind(schema, "ligand").get(binder) or {}
         summary = write_summary(
-            results, records, chains, template, str(options["output_format"])
+            results,
+            records,
+            chains,
+            template,
+            str(options["output_format"]),
+            ligand_smiles=binder_entry.get("smiles"),
+            affinity_binder=binder in affinity_binders(schema),
         )
         click.echo(f"Pointprobe summary written to {summary}.")
 

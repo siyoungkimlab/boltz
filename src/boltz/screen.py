@@ -21,9 +21,12 @@ from boltz.batch import (
     CONFIDENCE_SCORES,
     DEFAULT_MAX_DISTANCE,
     DISTANCE_FIELDS,
+    SMILES_FIELDS,
+    affinity_binders,
     chain_ids,
     check_bonds,
     distance_columns,
+    ligand_smiles_columns,
     predicted_models,
     read_affinity,
     results_paths,
@@ -222,8 +225,10 @@ def write_summary(
     ligand_id: str,
     pocket: Optional[dict],
     output_format: str,
+    *,
+    affinity_binder: bool = False,
 ) -> Path:
-    """Tabulate every structure: its ligand, pocket distances and scores."""
+    """Tabulate every structure: its ligand, its SMILES, pocket distances and scores."""
     contacts = (
         [(str(c), int(r)) for c, r in pocket["contacts"] if isinstance(r, int)]
         if pocket
@@ -240,10 +245,14 @@ def write_summary(
         ):
             row = {
                 "ligand": ligand.name,
-                "smiles": ligand.smiles,
                 "model": model,
                 "structure": structure.name if structure else "",
             }
+            row.update(
+                ligand_smiles_columns(
+                    structure, ligand_id, ligand.smiles, affinity_binder
+                )
+            )
             if contacts:
                 row.update(
                     distance_columns(structure, ligand_id, contacts, max_distance)
@@ -251,7 +260,7 @@ def write_summary(
             row.update(score_columns(confidence, affinity))
             rows.append(row)
 
-    fields = ["ligand", "smiles", "model", "structure"]
+    fields = ["ligand", "model", "structure", *SMILES_FIELDS]
     if contacts:
         fields += DISTANCE_FIELDS
     fields += CONFIDENCE_SCORES
@@ -322,7 +331,12 @@ def make_screen_command(predict: click.Command, compute_msa: Callable) -> click.
         run_predict(predict, options, inputs_dir)
 
         summary = write_summary(
-            results, ligands, ligand_id, pocket, str(options["output_format"])
+            results,
+            ligands,
+            ligand_id,
+            pocket,
+            str(options["output_format"]),
+            affinity_binder=ligand_id in affinity_binders(schema),
         )
         click.echo(f"Screen summary written to {summary}.")
 
