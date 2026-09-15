@@ -27,6 +27,7 @@ from boltz.batch import (
     all_chain_ids,
     chains_of_kind,
     check_bonds,
+    check_guidance_weights,
     distance_columns,
     ligand_smiles_columns,
     predicted_models,
@@ -298,6 +299,7 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
     )
 
     def pointprobe(**options: object) -> None:  # noqa: C901, PLR0912, PLR0915
+        check_guidance_weights(options)
         spec = options.pop("probe")
         binder_chain = options.pop("binder")
         window = int(options.pop("window"))

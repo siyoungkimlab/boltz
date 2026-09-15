@@ -136,6 +136,10 @@ Examples of common options include:
 
 * Adding the `--use_potentials` flag, Boltz uses an inference time potential that significantly improve the physical quality of the poses. 
 
+  Three of these potentials can be made stronger or weaker, in both Boltz-1 and Boltz-2: `--bond_guidance_weight` (default 0.15) for `bond` constraints, `--chiral_guidance_weight` (0.1) for stereocenters, and `--stereo_bond_guidance_weight` (0.05) for double bond geometry. Each sets the step size of that potential's guidance, the nudges toward satisfying it during sampling; 0 turns its guidance off, though it still counts when Boltz picks among its parallel candidates. They need `--use_potentials`.
+
+  These weights only nudge the atoms they name toward a better geometry; they do not move a molecule the model has placed elsewhere. A stronger `--bond_guidance_weight` pulls just the two bonded atoms together, so if the model has not placed the ligand at its partner residue, raising it stretches the neighbouring bonds of both instead (for example the cysteine's CB-SG bond), and very high values can make the guidance unstable. Check the geometry around the bond, not only the bond length.
+
 * To predict a structure using 10 recycling steps and 25 samples (the default parameters for AlphaFold3) use (note however that the prediction will take significantly longer): `--recycling_steps 10 --diffusion_samples 25`
 
 
@@ -168,6 +172,9 @@ Examples of common options include:
 | `--msa_server_url`       | str             | `https://api.colabfold.com` | MSA server url. Used only if --use_msa_server is set.                                                                                                                               |
 | `--msa_pairing_strategy` | str             | `greedy`                    | Pairing strategy to use. Used only if --use_msa_server is set. Options are 'greedy' and 'complete'                                                                                  |
 | `--use_potentials`        | `FLAG`          | `False`                     | Whether to run the original Boltz-2 model using inference time potentials.                                                                                                        |
+| `--bond_guidance_weight` | `FLOAT` | `0.15` | With `--use_potentials`, how strongly guidance pulls the two atoms of each `bond` constraint to within 2 Å of each other. |
+| `--chiral_guidance_weight` | `FLOAT` | `0.1` | With `--use_potentials`, how strongly guidance keeps each stereocenter as the input specifies it. |
+| `--stereo_bond_guidance_weight` | `FLOAT` | `0.05` | With `--use_potentials`, how strongly guidance keeps each double bond's E/Z geometry as the input specifies it. |
 | `--write_full_pae`       | `FLAG`          | `False`                     | Whether to save the full PAE matrix as a file.                                                                                                                                      |
 | `--write_full_pde`       | `FLAG`          | `False`                     | Whether to save the full PDE matrix as a file.                                                                                                                                      |
 

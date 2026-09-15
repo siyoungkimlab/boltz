@@ -25,6 +25,7 @@ from boltz.batch import (
     affinity_binders,
     chain_ids,
     check_bonds,
+    check_guidance_weights,
     distance_columns,
     ligand_smiles_columns,
     predicted_models,
@@ -290,6 +291,7 @@ def make_screen_command(predict: click.Command, compute_msa: Callable) -> click.
     )
 
     def screen(**options: object) -> None:
+        check_guidance_weights(options)
         ligands_path = Path(str(options.pop("ligands"))).expanduser()
         ligand_choice = options.pop("ligand")
         data = Path(str(options["data"])).expanduser()
