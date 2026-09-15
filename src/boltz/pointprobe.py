@@ -19,12 +19,15 @@ import click
 import yaml
 
 from boltz.batch import (
+    BOND_FIELDS,
     CONFIDENCE_SCORES,
     DEFAULT_MAX_DISTANCE,
     DISTANCE_FIELDS,
     SMILES_FIELDS,
     affinity_binders,
     all_chain_ids,
+    bond_columns,
+    bond_constraints,
     chains_of_kind,
     check_bonds,
     distance_columns,
@@ -212,6 +215,7 @@ def write_summary(
     *,
     ligand_smiles: Optional[str] = None,
     affinity_binder: bool = False,
+    bonds: Optional[list] = None,
 ) -> Path:
     """Tabulate every structure: its probed residue, SMILES, distances and scores."""
     binder = str(template["binder"])
@@ -237,6 +241,8 @@ def write_summary(
                 ligand_smiles_columns(structure, binder, ligand_smiles, affinity_binder)
             )
             row.update(distance_columns(structure, binder, contacts, max_distance))
+            if bonds:
+                row.update(bond_columns(structure, bonds))
             row.update(score_columns(confidence, affinity))
             rows.append(row)
 
@@ -249,6 +255,7 @@ def write_summary(
         "structure",
         *SMILES_FIELDS,
         *DISTANCE_FIELDS,
+        *(BOND_FIELDS if bonds else ()),
         *CONFIDENCE_SCORES,
     ]
     return write_csv(results / "pointprobe_summary.csv", rows, fields)
@@ -387,6 +394,7 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
             str(options["output_format"]),
             ligand_smiles=binder_entry.get("smiles"),
             affinity_binder=binder in affinity_binders(schema),
+            bonds=bond_constraints(schema),
         )
         click.echo(f"Pointprobe summary written to {summary}.")
 

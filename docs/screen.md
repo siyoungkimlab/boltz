@@ -78,6 +78,9 @@ out_dir/boltz_results_[template]_screen/
 | `input_smiles` | The ligand's SMILES, as given |
 | `predicted_smiles` | The ligand's SMILES as predicted, with its stereochemistry read from the predicted coordinates. From MAE and DMS output it is the ligand exactly as the file holds it: its atoms, formal charges and bond orders. PDB and mmCIF keep no bond orders or charges, so there the input's chemistry is placed on the predicted coordinates. |
 | `matches_input` | Whether the predicted ligand is the input: the same atoms, bonds and charges, and every stereocenter and double bond geometry the input SMILES specifies (unspecified ones are ignored). For the affinity binder, compared with the SMILES as Boltz standardizes it, which neutralizes charges. |
+| `bond_length` | With `bond` constraints: the distance between the two constrained atoms, in Å; one value per constraint, separated by `;` |
+| `bond_neighbor_max` | The longest bond from either constrained atom to the rest of its own molecule, such as a cysteine's CB-SG, from the MAE or DMS bond table (blank for PDB and mmCIF). A potential can pull the two constrained atoms together without the model placing the molecules, stretching these bonds instead. |
+| `bond_intact` | Whether each constrained bond is within 0.2 Å of a single bond between its two elements (the sum of their covalent radii: 1.81 Å for C-S, so 1.61-2.01 Å), and no other bond of its atoms is more than 0.3 Å longer than a single bond between its elements |
 | `min_distance`, `max_contact_distance`, `com_distance`, `ca_com_distance`, `within_max_distance` | When the template has a pocket constraint on the ligand: how close the ligand came to the pocket's residues, as in [pointprobe](pointprobe.md) |
 | `confidence_score`, `ptm`, `iptm`, `ligand_iptm`, ... | The scores from the structure's confidence file |
 | `affinity_pred_value`, `affinity_probability_binary` | The affinity, when the template requests it |
