@@ -47,10 +47,17 @@ boltz pointprobe input.yaml --use_msa_server --probe A:30-80 --diffusion_samples
 | `--probe` | `TEXT` | every protein residue | The residues to probe, as comma-separated chains and residue ranges, e.g. `A,B:10-50,B:62`. Residues are numbered from 1. |
 | `--binder` | `TEXT` | the input's only ligand | The chain to probe with, when the input has no pocket constraint without contacts naming it. |
 | `--window` | `INTEGER` | `1` | The number of consecutive residues in each pocket: the probed residue and the ones after it in its chain. |
+| `--baseline` | flag | off | Run the same predictions without the probed pocket, as a baseline to compare with. See below. |
 
 With `--diffusion_samples 5` and N residues, you get 5N structures.
 
 With `--window 2`, the pocket of residue 1 is residues 1 and 2, of residue 2 is residues 2 and 3, and so on, so there is still one prediction per residue. A window never crosses into the next chain: at a chain's end it is cut short, and the last residue's pocket is that residue alone. The ligand is held within `max_distance` of every residue of its pocket. A run with `--window` above 1 gets its own output folder, `boltz_results_[input]_pointprobe_w2` for `--window 2`.
+
+### Baseline
+
+With `--baseline`, pointprobe runs the same N predictions, one per residue and with the same names, but without the probed pocket. The input's other constraints, such as a covalent bond, are kept. Each residue's row in the summary then shows how close the ligand came to that residue on its own, in the same columns, to compare row by row with a probing run; `within_max_distance` says whether the ligand met the pocket's `max_distance` unconstrained.
+
+These are N independent runs, each with `--diffusion_samples` structures, which is not the same as one run with N diffusion samples: every run builds its own ligand conformer and runs the whole model again. The MSA is still computed once and the model loaded once. A baseline gets its own output folder, `boltz_results_[input]_pointprobe_baseline`.
 
 ## Output
 

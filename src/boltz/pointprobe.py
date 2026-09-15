@@ -73,21 +73,23 @@ def find_template(schema: dict) -> Optional[tuple[int, dict]]:
     return templates[0] if templates else None
 
 
-def add_template(schema: dict, binder: Optional[str]) -> tuple[int, dict]:
-    """Add a default pocket constraint without contacts, for the binder.
+def choose_binder(schema: dict, binder: Optional[str]) -> str:
+    """Return the chain to probe with: ``binder``, or the input's only ligand."""
+    if binder is not None:
+        return binder
+    ligands = list(chains_of_kind(schema, "ligand"))
+    if len(ligands) != 1:
+        found = f"ligands {', '.join(ligands)}" if ligands else "no ligand"
+        msg = (
+            f"The input has {found}: name the chain to probe with using "
+            "--binder, or with a pocket constraint without contacts."
+        )
+        raise click.UsageError(msg)
+    return ligands[0]
 
-    Without ``binder``, it is the input's only ligand.
-    """
-    if binder is None:
-        ligands = list(chains_of_kind(schema, "ligand"))
-        if len(ligands) != 1:
-            found = f"ligands {', '.join(ligands)}" if ligands else "no ligand"
-            msg = (
-                f"The input has {found}: name the chain to probe with using "
-                "--binder, or with a pocket constraint without contacts."
-            )
-            raise click.UsageError(msg)
-        binder = ligands[0]
+
+def add_template(schema: dict, binder: str) -> tuple[int, dict]:
+    """Add a default pocket constraint without contacts, for the binder."""
     click.echo(
         f"Probing with {binder} using the default pocket: max_distance "
         f"{DEFAULT_MAX_DISTANCE:g}, no force."
@@ -165,22 +167,30 @@ def make_probes(
     return probes
 
 
-def check_boltz1(schema: dict, template: dict) -> None:
-    """Fail early on what Boltz-1 does not support, not once per residue."""
+def check_boltz1(schema: dict, template: dict, probing: bool = True) -> None:
+    """Fail early on what Boltz-1 does not support, not once per residue.
+
+    Boltz-1 takes one pocket constraint, at 6 Angstrom. When probing,
+    pointprobe adds it; a baseline adds none, so only the input's own count.
+    """
     others = [
-        c
+        c["pocket"]
         for c in schema.get("constraints") or []
         if "pocket" in c and "contacts" in c["pocket"]
     ]
-    if others:
+    if probing and others:
         msg = (
             "Boltz-1 supports one pocket constraint, and pointprobe adds it; "
             "remove the other pocket constraints or use --model boltz2."
         )
         raise click.UsageError(msg)
-    if (
-        float(template.get("max_distance", DEFAULT_MAX_DISTANCE))
-        != DEFAULT_MAX_DISTANCE
+    if len(others) > 1:
+        msg = "Boltz-1 supports one pocket constraint; use --model boltz2."
+        raise click.UsageError(msg)
+    pockets = [template] if probing else others
+    if any(
+        float(p.get("max_distance", DEFAULT_MAX_DISTANCE)) != DEFAULT_MAX_DISTANCE
+        for p in pockets
     ):
         msg = "Boltz-1 supports only max_distance 6; use --model boltz2."
         raise click.UsageError(msg)
@@ -234,7 +244,7 @@ def write_summary(
     return write_csv(results / "pointprobe_summary.csv", rows, fields)
 
 
-def make_pointprobe_command(
+def make_pointprobe_command(  # noqa: C901, PLR0915
     predict: click.Command, compute_msa: Callable
 ) -> click.Command:
     """Build ``boltz pointprobe`` from ``boltz predict``, sharing its options."""
@@ -267,10 +277,21 @@ def make_pointprobe_command(
         ),
     )
 
-    def pointprobe(**options: object) -> None:
+    baseline_option = click.Option(
+        ["--baseline"],
+        is_flag=True,
+        help=(
+            "Run the same predictions without the probed pocket, one independent "
+            "run per residue, to compare with: each residue's row then shows how "
+            "close the ligand came to it on its own."
+        ),
+    )
+
+    def pointprobe(**options: object) -> None:  # noqa: C901, PLR0912, PLR0915
         spec = options.pop("probe")
         binder_chain = options.pop("binder")
         window = int(options.pop("window"))
+        baseline = bool(options.pop("baseline"))
         data = Path(str(options["data"])).expanduser()
         if data.suffix.lower() not in (".yml", ".yaml"):
             msg = "pointprobe takes a YAML file, which can hold pocket constraints."
@@ -279,7 +300,11 @@ def make_pointprobe_command(
         schema = yaml.safe_load(data.read_text())
         found = find_template(schema)
         if found is None:
-            template_index, template = add_template(schema, binder_chain)
+            binder = choose_binder(schema, binder_chain)
+            if baseline:
+                template_index, template = None, {"binder": binder}
+            else:
+                template_index, template = add_template(schema, binder)
         else:
             template_index, template = found
             if binder_chain is not None and binder_chain != str(template["binder"]):
@@ -299,13 +324,17 @@ def make_pointprobe_command(
             msg = "There are no protein residues to probe."
             raise click.UsageError(msg)
         if options["model"] == "boltz1":
-            check_boltz1(schema, template)
+            check_boltz1(schema, template, probing=not baseline)
         probes = make_probes(targets, chains, window)
 
-        # Each window gets its own results, since predictions are named by
-        # probed residue.
+        # Each window, and the baseline, gets its own results, since
+        # predictions are named by probed residue.
         name = data.stem
-        run = f"{name}_pointprobe" + (f"_w{window}" if window > 1 else "")
+        run = (
+            f"{name}_pointprobe"
+            + ("_baseline" if baseline else "")
+            + (f"_w{window}" if window > 1 else "")
+        )
         results, inputs_dir = results_paths(options, run, "pointprobe_inputs")
 
         share_msa(schema, name, results / "msa", options, compute_msa)
@@ -313,16 +342,29 @@ def make_pointprobe_command(
         inputs = {}
         for record_id, probe in records.items():
             variant = copy.deepcopy(schema)
-            variant["constraints"][template_index]["pocket"]["contacts"] = [
-                [probe.chain, resid] for resid in probe.contacts
-            ]
+            if not baseline:
+                variant["constraints"][template_index]["pocket"]["contacts"] = [
+                    [probe.chain, resid] for resid in probe.contacts
+                ]
+            elif template_index is not None:
+                # A baseline keeps the input's other constraints, not the probe.
+                del variant["constraints"][template_index]
+                if not variant["constraints"]:
+                    del variant["constraints"]
             inputs[record_id] = variant
         write_inputs(inputs, inputs_dir)
-        click.echo(
-            f"Pointprobe: probing {len(records)} residues with {binder}, "
-            f"{window} residue(s) per pocket, "
-            f"{options['diffusion_samples']} structure(s) each."
-        )
+        if baseline:
+            click.echo(
+                f"Pointprobe baseline: {len(records)} independent runs without the "
+                f"probed pocket, one per residue, measuring {binder}'s distance to "
+                f"each; {options['diffusion_samples']} structure(s) each."
+            )
+        else:
+            click.echo(
+                f"Pointprobe: probing {len(records)} residues with {binder}, "
+                f"{window} residue(s) per pocket, "
+                f"{options['diffusion_samples']} structure(s) each."
+            )
 
         run_predict(predict, options, inputs_dir)
 
@@ -334,7 +376,13 @@ def make_pointprobe_command(
     return click.Command(
         name="pointprobe",
         callback=pointprobe,
-        params=[*predict.params, probe_option, binder_option, window_option],
+        params=[
+            *predict.params,
+            probe_option,
+            binder_option,
+            window_option,
+            baseline_option,
+        ],
         help=HELP,
         short_help="Probe every protein residue as a pocket for a ligand.",
     )
