@@ -54,6 +54,7 @@ To update, run `git pull` in the clone, which an editable install picks up. For 
 
 * **`boltz pointprobe`.** Probes every protein residue as a pocket for a ligand: one prediction per residue, each with a pocket constraint between the ligand and that residue, sharing one MSA and one loaded model. A CSV summarizes how close the ligand came to each residue and how confident the model is. See [pointprobe](docs/pointprobe.md).
 * **`boltz screen`.** Predicts a complex with each ligand of a list, from a template YAML and a file of SMILES, sharing one MSA and one loaded model. A CSV summarizes each ligand's confidence and, when requested, its affinity. See [screen](docs/screen.md).
+* **`boltz atomname`.** Prints the names Boltz gives a SMILES ligand's atoms, and draws the ligand labelled with them, for covalent bond constraints, which name a ligand atom. See [prediction](docs/prediction.md).
 * **MAE and DMS output.** `--output_format mae` (the default) and `dms` write every bond with its order and every atom with its formal charge, which PDB and mmCIF drop, with protein residues in their pH 7 states. Each structure also carries its confidence scores. See [prediction](docs/prediction.md).
 * **Timing.** Each prediction writes a `timing_[input].json` with how long each stage took: the MSA server, model loading, the pairformer, diffusion, and so on.
 * **A copy of the input.** Each prediction folder keeps a copy of the input file it was predicted from.
