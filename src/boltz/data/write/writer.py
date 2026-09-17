@@ -98,6 +98,10 @@ class BoltzWriter(TimedPredictionWriter):
 
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
+        # Every structure of the run is also copied here, in one flat folder
+        # beside the results folder: the predictions themselves sit two
+        # folders deep, under predictions/<record>.
+        self.structures_dir = self.output_dir.parent.parent / "structures"
         self.output_format = output_format
         self.failed = 0
         self.boltz2 = boltz2
@@ -339,6 +343,10 @@ class BoltzWriter(TimedPredictionWriter):
                 else:
                     path = struct_dir / f"{outname}.npz"
                     np.savez_compressed(path, **asdict(new_structure))
+
+                if path.suffix != ".npz":
+                    self.structures_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, self.structures_dir / path.name)
 
                 if self.boltz2 and record.affinity and idx_to_rank[model_idx] == 0:
                     path = struct_dir / f"pre_affinity_{record.id}.npz"
