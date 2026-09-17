@@ -183,6 +183,15 @@ Examples of common options include:
 After running the model, the generated outputs are organized into the output directory following the structure below:
 ```
 out_dir/
+├── structures/                                                # Every predicted structure of the run, in one flat folder
+    ├── [input_file1]_model_0.cif
+    ...
+    └── [input_file2]_model_0.cif
+└── boltz_results_[input]/                                     # Everything else, as below
+```
+
+```
+out_dir/boltz_results_[input]/
 ├── lightning_logs/                                            # Logs generated during training or evaluation
 ├── predictions/                                               # Contains the model's predictions
     ├── [input_file1]/
@@ -203,7 +212,7 @@ out_dir/
         ...
 └── processed/                                                 # Processed data used during execution 
 ```
-The `predictions` folder contains a unique folder for each input file. The input folders contain `diffusion_samples` predictions saved in the output_format ordered by confidence score as well as additional files containing the predictions of the confidence model and affinity model. The `processed` folder contains the processed input files that the model uses during inference.
+The `predictions` folder contains a unique folder for each input file. The input folders contain `diffusion_samples` predictions saved in the output_format ordered by confidence score as well as additional files containing the predictions of the confidence model and affinity model. The `processed` folder contains the processed input files that the model uses during inference. The `structures` folder, written next to the results folder, holds a copy of every predicted structure of the run together, named `[input_file]_model_[n]`, so they can be loaded or passed on without walking the folder per input; the originals stay in `predictions`. A run of `boltz pointprobe` or `boltz screen`, which predicts many inputs at once, gathers all of them there.
 
 Each output folder includes a confidence `.json` file with aggregated confidence scores for that sample. Its structure is:
 ```yaml
