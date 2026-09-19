@@ -99,9 +99,9 @@ class BoltzWriter(TimedPredictionWriter):
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
         # Every structure of the run is also copied here, in one flat folder
-        # beside the results folder: the predictions themselves sit two
-        # folders deep, under predictions/<record>.
-        self.structures_dir = self.output_dir.parent.parent / "structures"
+        # of the results: the predictions themselves sit one folder deeper,
+        # under predictions/<record>.
+        self.structures_dir = self.output_dir.parent / "structures"
         self.output_format = output_format
         self.failed = 0
         self.boltz2 = boltz2
