@@ -7,7 +7,7 @@ Once `boltz` is installed, you can run predictions with:
 * `<INPUT_PATH>` can be either a single .yaml or .fasta file (YAML is preferred; FASTA is deprecated), or a directory, in which case predictions will be run on all `.yaml` and `.fasta` files inside.
 * If you include `--use_msa_server`, the MSA will be generated automatically via the mmseqs2 server. Without this flag, you must provide a pre-computed MSA.
 * If you include `--use_potentials`, Boltz will apply inference-time potentials to improve the physical plausibility of the predicted poses.
-* Without the `--override` options, Boltz will try to use the cached preprocessed files and existing predictions, if any are present in your output directory (name of your input by default). Add the `--override` flag to run the prediction from scratch, e.g. if you change some parameters or complex details without changing the output directory.
+* Without the `--override` options, Boltz will try to use the cached preprocessed files and existing predictions, if any are present in your output directory (name of your input by default). Add the `--override` flag to run the prediction from scratch, e.g. if you change some parameters or complex details without changing the output directory. A prediction counts as existing only once it has every sample's confidence and the timing written after them, so one cut short, by a wall clock limit say, is predicted again rather than skipped for having left a folder behind.
 
 
 ## Input format
