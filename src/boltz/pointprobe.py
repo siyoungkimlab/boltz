@@ -224,6 +224,16 @@ class Swap(NamedTuple):
     template: str  # the entry's value, holding {} where a value goes
 
 
+def parse_inline_ligands(values: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Read --ligand values, each a line of a --ligands file: value then name."""
+    entries = []
+    for text in values:
+        value, *rest = text.strip().split(maxsplit=1)
+        if value:
+            entries.append((value, rest[0].strip() if rest else ""))
+    return entries
+
+
 def find_swap(schema: dict, binder: str) -> Swap:
     """Find the entry each value of a --ligands list is swapped into.
 
@@ -451,6 +461,18 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
         ),
     )
 
+    ligand_option = click.Option(
+        ["--ligand"],
+        multiple=True,
+        default=(),
+        help=(
+            "One ligand or peptide to probe with, written as a line of a "
+            "--ligands file: the value, then optionally its name, as in "
+            '"Oc1ccccc1 phenol" or "GGSGG pepA". Repeat it for several, and '
+            "combine it with --ligands."
+        ),
+    )
+
     baseline_option = click.Option(
         ["--baseline"],
         is_flag=True,
@@ -468,6 +490,7 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
         window = int(options.pop("window"))
         baseline = bool(options.pop("baseline"))
         ligands_path = options.pop("ligands")
+        inline = tuple(options.pop("ligand") or ())
         data = Path(str(options["data"])).expanduser()
         if data.suffix.lower() not in (".yml", ".yaml"):
             msg = "pointprobe takes a YAML file, which can hold pocket constraints."
@@ -495,14 +518,18 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
             raise click.UsageError(msg)
         check_bonds(schema)
         ligands, swap, record_ligands = None, None, None
-        if ligands_path is not None:
+        if ligands_path is not None or inline:
             swap = find_swap(schema, binder)
             check_swap_msa(schema, swap)
             if swap.kind == "ligand":
                 # Each ligand names its atoms differently, as in a screen.
                 check_screen_bonds(schema, binder)
-            path = Path(str(ligands_path)).expanduser()
-            entries = name_ligands(read_ligands(path, (swap.field, "smiles")))
+            listed = []
+            if ligands_path is not None:
+                path = Path(str(ligands_path)).expanduser()
+                listed = read_ligands(path, (swap.field, "smiles"))
+            listed += parse_inline_ligands(inline)
+            entries = name_ligands(listed)
             ligands, invalid = (
                 split_valid(entries)
                 if swap.kind == "ligand"
@@ -516,7 +543,8 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
             for entry in invalid:
                 click.echo(f"Skipping {entry.name}: {unreadable} {entry.smiles}")
             if not ligands:
-                msg = f"No entry of {path.name} is a " + (
+                source = "--ligand" if ligands_path is None else path.name
+                msg = f"No entry of {source} is a " + (
                     "SMILES RDKit can read."
                     if swap.kind == "ligand"
                     else "protein sequence."
@@ -619,6 +647,7 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
             window_option,
             baseline_option,
             ligands_option,
+            ligand_option,
         ],
         help=HELP,
         short_help="Probe every protein residue as a pocket for a ligand.",

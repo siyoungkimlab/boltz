@@ -49,6 +49,7 @@ boltz pointprobe input.yaml --use_msa_server --probe A:30-80 --diffusion_samples
 | `--window` | `INTEGER` | `1` | The number of consecutive residues in each pocket: the probed residue and the ones after it in its chain. |
 | `--baseline` | flag | off | Run the same predictions without the probed pocket, as a baseline to compare with. See below. |
 | `--ligands` | `PATH` | none | Probe with each ligand or peptide of a list, one after another: every residue for every one of them. See below. |
+| `--ligand` | `TEXT` | none | One ligand or peptide, written as a line of a `--ligands` file, such as `"Oc1ccccc1 phenol"`. Repeat it for several, and combine it with `--ligands`. |
 
 With `--diffusion_samples 5` and N residues, you get 5N structures.
 
@@ -68,6 +69,13 @@ The list is a `.csv` file with a `smiles` or `sequence` column and optionally a 
 name,smiles
 lig_a,Oc1ccccc1
 lig_b,CCO
+```
+
+For a handful of values, `--ligand` takes them on the command line instead, each written as one line of that file: the value, then an optional name. It can be repeated, and combined with `--ligands`; a value without a name is called `lig_001`, `lig_002`, and so on.
+
+```bash
+boltz pointprobe input.yaml --probe A:101 \
+    --ligand "Oc1ccccc1 phenol" --ligand "CCO ethanol" --ligand "GGSGG pepA"
 ```
 
 **What gets swapped.** Write `{}` where each value goes:
