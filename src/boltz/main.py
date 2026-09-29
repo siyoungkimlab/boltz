@@ -335,6 +335,7 @@ def filter_inputs_structure(
     manifest: Manifest,
     outdir: Path,
     override: bool = False,
+    diffusion_samples: int = 1,
 ) -> Manifest:
     """Filter the manifest to only include missing predictions.
 
@@ -346,6 +347,8 @@ def filter_inputs_structure(
         The output directory.
     override: bool
         Whether to override existing predictions.
+    diffusion_samples : int
+        How many structures a finished prediction has.
 
     Returns
     -------
@@ -353,25 +356,46 @@ def filter_inputs_structure(
         The manifest of the filtered input data.
 
     """
-    # Check if existing predictions are found (only top-level prediction folders)
+    # A prediction is finished when every sample's confidence is there and the
+    # timing written after them; one cut short, by a wall clock limit say, is
+    # predicted again rather than skipped for having left a folder behind.
     pred_dir = outdir / "predictions"
+    finished, unfinished = set(), set()
     if pred_dir.exists():
-        existing = {d.name for d in pred_dir.iterdir() if d.is_dir()}
-    else:
-        existing = set()
+        for folder in (d for d in pred_dir.iterdir() if d.is_dir()):
+            samples = len(list(folder.glob(f"confidence_{folder.name}_model_*.json")))
+            complete = (
+                samples >= diffusion_samples
+                and (folder / f"timing_{folder.name}.json").exists()
+            )
+            if complete:
+                finished.add(folder.name)
+            else:
+                unfinished.add(folder.name)
 
-    # Remove them from the input data
-    if existing and not override:
-        manifest = Manifest([r for r in manifest.records if r.id not in existing])
+    if override:
+        if finished or unfinished:
+            msg = (
+                f"Found {len(finished) + len(unfinished)} existing predictions, "
+                "will override."
+            )
+            click.echo(msg)
+        return manifest
+
+    if unfinished:
         msg = (
-            f"Found some existing predictions ({len(existing)}), "
+            f"Found {len(unfinished)} prediction(s) left unfinished, such as "
+            f"{min(unfinished)}, predicting them again."
+        )
+        click.echo(msg)
+    if finished:
+        manifest = Manifest([r for r in manifest.records if r.id not in finished])
+        msg = (
+            f"Found some existing predictions ({len(finished)}), "
             f"skipping and running only the missing ones, "
             "if any. If you wish to override these existing "
             "predictions, please set the --override flag."
         )
-        click.echo(msg)
-    elif existing and override:
-        msg = f"Found {len(existing)} existing predictions, will override."
         click.echo(msg)
 
     return manifest
@@ -1300,6 +1324,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         manifest=manifest,
         outdir=out_dir,
         override=override,
+        diffusion_samples=diffusion_samples,
     )
 
     # Load processed data
