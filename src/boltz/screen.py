@@ -57,28 +57,32 @@ class Ligand(NamedTuple):
     smiles: str
 
 
-def read_ligands(path: Path) -> list[tuple[str, str]]:
-    """Read (SMILES, name) pairs from a ligand list; the name may be empty.
+def read_ligands(
+    path: Path, columns: tuple[str, ...] = ("smiles",)
+) -> list[tuple[str, str]]:
+    """Read (value, name) pairs from a list; the name may be empty.
 
-    A ``.csv`` file has a ``smiles`` column and optionally a ``name`` column.
-    Any other file has one ligand per line: a SMILES, then optionally its name.
-    Blank lines and lines starting with ``#`` are skipped.
+    A ``.csv`` file has one of ``columns`` holding the value, a SMILES or a
+    sequence, and optionally a ``name`` column. Any other file has one per
+    line: the value, then optionally its name. Blank lines and lines starting
+    with ``#`` are skipped.
     """
     if path.suffix.lower() == ".csv":
         with path.open(newline="") as f:
             reader = csv.DictReader(f)
-            columns = {c.strip().lower(): c for c in reader.fieldnames or []}
-            if "smiles" not in columns:
-                msg = f"{path.name} has no smiles column."
+            found = {c.strip().lower(): c for c in reader.fieldnames or []}
+            column = next((found[c] for c in columns if c in found), None)
+            if column is None:
+                msg = f"{path.name} has no {' or '.join(columns)} column."
                 raise click.UsageError(msg)
-            name_column = columns.get("name") or columns.get("id")
+            name_column = found.get("name") or found.get("id")
             return [
                 (
-                    (row[columns["smiles"]] or "").strip(),
+                    (row[column] or "").strip(),
                     (row[name_column] or "").strip() if name_column else "",
                 )
                 for row in reader
-                if (row[columns["smiles"]] or "").strip()
+                if (row[column] or "").strip()
             ]
 
     ligands = []
@@ -86,11 +90,11 @@ def read_ligands(path: Path) -> list[tuple[str, str]]:
         text = line.strip()
         if not text or text.startswith("#"):
             continue
-        # The SMILES ends at the first space or tab; the rest is the name.
-        smiles, *rest = text.split(maxsplit=1)
-        if not ligands and smiles.lower() == "smiles":
+        # The value ends at the first space or tab; the rest is the name.
+        value, *rest = text.split(maxsplit=1)
+        if not ligands and value.lower() in columns:
             continue  # a header line
-        ligands.append((smiles, rest[0].strip() if rest else ""))
+        ligands.append((value, rest[0].strip() if rest else ""))
     return ligands
 
 
