@@ -48,10 +48,49 @@ boltz pointprobe input.yaml --use_msa_server --probe A:30-80 --diffusion_samples
 | `--binder` | `TEXT` | the input's only ligand | The chain to probe with, when the input has no pocket constraint without contacts naming it. |
 | `--window` | `INTEGER` | `1` | The number of consecutive residues in each pocket: the probed residue and the ones after it in its chain. |
 | `--baseline` | flag | off | Run the same predictions without the probed pocket, as a baseline to compare with. See below. |
+| `--ligands` | `PATH` | none | Probe with each ligand or peptide of a list, one after another: every residue for every one of them. See below. |
 
 With `--diffusion_samples 5` and N residues, you get 5N structures.
 
 With `--window 2`, the pocket of residue 1 is residues 1 and 2, of residue 2 is residues 2 and 3, and so on, so there is still one prediction per residue. A window never crosses into the next chain: at a chain's end it is cut short, and the last residue's pocket is that residue alone. The ligand is held within `max_distance` of every residue of its pocket. A run with `--window` above 1 gets its own output folder, `boltz_results_[input]_pointprobe_w2` for `--window 2`.
+
+### Several ligands or peptides
+
+With `--ligands`, every residue is probed with each entry of a list, one after another, in a single run:
+
+```bash
+boltz pointprobe input.yaml --ligands ligands.csv --probe A:90-110 --use_msa_server
+```
+
+The list is a `.csv` file with a `smiles` or `sequence` column and optionally a `name` column, or a `.smi`/`.txt` file with one value per line followed by an optional name. A value RDKit cannot read, or that is not a protein sequence, is reported and skipped.
+
+```csv
+name,smiles
+lig_a,Oc1ccccc1
+lig_b,CCO
+```
+
+**What gets swapped.** Write `{}` where each value goes:
+
+```yaml
+  - ligand:
+      id: L
+      smiles: "{}"          # each SMILES replaces this entry
+  - protein:
+      id: B
+      sequence: "ACD{}GH"   # each value is inserted, keeping the scaffold
+      msa: empty
+```
+
+The entry holding `{}` is the one swapped, which also settles which entry is meant when the input has several. Without any `{}`, the probed binder's own `smiles` or `sequence` is replaced whole. The swapped entry must be the chain being probed with, so use `--binder` when it is not the input's only ligand.
+
+**Peptides.** The swapped entry can be a protein chain, so a peptide binder is probed against the target just like a ligand. Such a chain needs its own `msa`, usually `msa: empty` for single-sequence mode: the MSA shared by the runs is computed before the sequences are swapped in, so it would otherwise belong to the placeholder.
+
+**Naming and cost.** Each prediction is named `[input]_[name]_[chain]_[residue]`, so `input_lig_a_A_101`. The number of runs is residues times entries, each with `--diffusion_samples` structures: 20 residues and 10 ligands at 5 samples is 1000 structures. The MSA is still computed once and the model loaded once.
+
+**In the summary,** each row names its entry in a `ligand` column, and `input_smiles` is that entry's own SMILES. A peptide binder gets a `binder_sequence` column instead, with the SMILES columns left blank.
+
+Two refusals: a `bond` constraint on the swapped chain, since each ligand names its atoms differently (screen a fixed ligand for that), and a value that changed since the last run into the same `--out_dir` under the same name, whose processed input Boltz would otherwise reuse.
 
 ### Baseline
 
@@ -68,7 +107,7 @@ out_dir/boltz_results_[input]_pointprobe/
 ├── msa/                            # The MSA, computed once
 ├── predictions/
     ├── [input]_A_1/                # The usual prediction output for residue A1
-    ├── [input]_A_2/
+    ├── [input]_A_2/                # With --ligands: [input]_[name]_A_1, and so on
     ...
 └── processed/
 ```

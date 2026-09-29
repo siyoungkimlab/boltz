@@ -649,7 +649,7 @@ _LETTER_TO_RESIDUE = {
 }
 
 
-def _bond_atom_problem(  # noqa: PLR0911
+def _bond_atom_problem(  # noqa: C901, PLR0911
     spec: object, entries: dict[str, tuple[str, dict]], affinity_binders: set[str]
 ) -> Optional[str]:
     """Say what is wrong with one atom of a bond constraint, if anything."""
@@ -659,6 +659,8 @@ def _bond_atom_problem(  # noqa: PLR0911
     if chain not in entries:
         return f"there is no chain {chain}"
     kind, entry = entries[chain]
+    if "{}" in str(entry.get("smiles", "")) + str(entry.get("sequence", "")):
+        return None  # a placeholder: the atoms are those of whatever is swapped in
 
     if kind == "ligand":
         if resid != 1:

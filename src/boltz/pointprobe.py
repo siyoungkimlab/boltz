@@ -28,6 +28,7 @@ from boltz.batch import (
     all_chain_ids,
     bond_columns,
     bond_constraints,
+    chain_ids,
     chains_of_kind,
     check_bonds,
     check_guidance_weights,
@@ -43,6 +44,13 @@ from boltz.batch import (
     write_inputs,
 )
 from boltz.data import const
+from boltz.screen import (
+    Ligand,
+    check_screen_bonds,
+    name_ligands,
+    read_ligands,
+    split_valid,
+)
 
 HELP = """Probe every protein residue as a pocket for a ligand.
 
@@ -203,6 +211,115 @@ def check_boltz1(schema: dict, template: dict, probing: bool = True) -> None:
         raise click.UsageError(msg)
 
 
+PLACEHOLDER = "{}"
+SWAP_FIELDS = {"ligand": "smiles", "protein": "sequence"}
+
+
+class Swap(NamedTuple):
+    """Where each value of a --ligands list goes, and what it replaces."""
+
+    index: int  # the sequence entry
+    kind: str  # ligand or protein
+    field: str  # smiles or sequence
+    template: str  # the entry's value, holding {} where a value goes
+
+
+def find_swap(schema: dict, binder: str) -> Swap:
+    """Find the entry each value of a --ligands list is swapped into.
+
+    An entry whose value holds ``{}`` is the one, and each value is put where
+    the ``{}`` is; otherwise it is the probed binder's own entry, whose value is
+    replaced. Either way the entry must be the binder, since that is the chain
+    being probed with.
+    """
+    marked = [
+        (index, kind, field, str(entry[field]))
+        for index, item in enumerate(schema["sequences"])
+        for kind, entry in item.items()
+        if (field := SWAP_FIELDS.get(kind)) is not None
+        and field in entry
+        and PLACEHOLDER in str(entry[field])
+    ]
+    if len(marked) > 1:
+        msg = (
+            f"Found {len(marked)} entries holding {PLACEHOLDER}; at most one is "
+            "swapped."
+        )
+        raise click.UsageError(msg)
+    if marked:
+        index, kind, field, template = marked[0]
+        if binder not in chain_ids(schema["sequences"][index][kind]):
+            msg = (
+                f"The entry holding {PLACEHOLDER} is not the probed binder {binder}; "
+                "probe with the chain whose value is swapped, or set --binder."
+            )
+            raise click.UsageError(msg)
+        return Swap(index, kind, field, template)
+
+    for index, item in enumerate(schema["sequences"]):
+        for kind, entry in item.items():
+            field = SWAP_FIELDS.get(kind)
+            if field is not None and binder in chain_ids(entry):
+                return Swap(index, kind, field, PLACEHOLDER)
+    msg = (
+        f"--ligands swaps each value into the probed binder, so {binder} must be a "
+        f"ligand or protein chain of the input, or hold {PLACEHOLDER}."
+    )
+    raise click.UsageError(msg)
+
+
+def check_swap_msa(schema: dict, swap: Swap) -> None:
+    """Require a swapped protein chain to carry its own MSA.
+
+    The MSA shared by the runs is computed before the values are swapped in, so
+    it would belong to the placeholder rather than to each sequence.
+    """
+    entry = schema["sequences"][swap.index][swap.kind]
+    if swap.kind == "protein" and "msa" not in entry:
+        msg = (
+            "A swapped protein chain needs its own msa, since the MSA shared by "
+            "the runs is computed before the sequences are swapped in; use "
+            "msa: empty for single-sequence mode, or give each a computed MSA."
+        )
+        raise click.UsageError(msg)
+
+
+def split_valid_sequences(
+    entries: list[Ligand],
+) -> tuple[list[Ligand], list[Ligand]]:
+    """Separate the values that read as protein sequences from those that do not."""
+    letters = set(const.prot_letter_to_token) - {"-"}
+    valid = [e for e in entries if e.smiles and set(e.smiles.upper()) <= letters]
+    return valid, [e for e in entries if e not in valid]
+
+
+def check_renamed_inputs(inputs_dir: Path, inputs: dict[str, dict], swap: Swap) -> None:
+    """Refuse a value that changed since the last run into this folder.
+
+    Boltz reuses an input it has processed before, by record id, so a changed
+    SMILES or sequence under the same name would be predicted as the old one.
+    """
+    changed = set()
+    for record_id, variant in inputs.items():
+        old = inputs_dir / f"{record_id}.yaml"
+        if not old.exists():
+            continue
+        previous = yaml.safe_load(old.read_text())["sequences"][swap.index]
+        current = variant["sequences"][swap.index]
+        if (
+            previous.get(swap.kind, {}).get(swap.field)
+            != current[swap.kind][swap.field]
+        ):
+            changed.add(record_id)
+    if changed:
+        msg = (
+            f"{len(changed)} input(s) had other SMILES in the last run into this "
+            "--out_dir, whose processed inputs Boltz would reuse, such as "
+            f"{min(changed)}; rename the ligands or use a new --out_dir."
+        )
+        raise click.UsageError(msg)
+
+
 def _format_contacts(contacts: list[int]) -> str:
     return str(contacts[0]) if len(contacts) == 1 else f"{contacts[0]}-{contacts[-1]}"
 
@@ -217,6 +334,8 @@ def write_summary(
     ligand_smiles: Optional[str] = None,
     affinity_binder: bool = False,
     bonds: Optional[list] = None,
+    ligands: Optional[dict[str, Ligand]] = None,
+    swapped: Optional[str] = None,
 ) -> Path:
     """Tabulate every structure: its probed residue, SMILES, distances and scores."""
     binder = str(template["binder"])
@@ -238,8 +357,19 @@ def write_summary(
                 "model": model,
                 "structure": structure.name if structure else "",
             }
+            if ligands is not None:
+                row["ligand"] = ligands[record_id].name
+                if swapped == "protein":
+                    row["binder_sequence"] = ligands[record_id].smiles
+            swapped_smiles = (
+                ligands[record_id].smiles
+                if ligands is not None and swapped == "ligand"
+                else ligand_smiles
+            )
             row.update(
-                ligand_smiles_columns(structure, binder, ligand_smiles, affinity_binder)
+                ligand_smiles_columns(
+                    structure, binder, swapped_smiles, affinity_binder
+                )
             )
             row.update(distance_columns(structure, binder, contacts, max_distance))
             if bonds:
@@ -248,6 +378,8 @@ def write_summary(
             rows.append(row)
 
     fields = [
+        *(["ligand"] if ligands is not None else []),
+        *(["binder_sequence"] if swapped == "protein" else []),
         "probe_chain",
         "probe_residue",
         "probe_residue_name",
@@ -295,6 +427,18 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
         ),
     )
 
+    ligands_option = click.Option(
+        ["--ligands"],
+        type=click.Path(exists=True, dir_okay=False),
+        default=None,
+        help=(
+            "Probe with each ligand of a list, one after another: every residue "
+            "for every ligand. A .smi or .txt file with a SMILES and optionally a "
+            "name on each line, or a .csv file with a smiles and optionally a name "
+            "column. Each ligand is swapped into the probed binder."
+        ),
+    )
+
     baseline_option = click.Option(
         ["--baseline"],
         is_flag=True,
@@ -311,6 +455,7 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
         binder_chain = options.pop("binder")
         window = int(options.pop("window"))
         baseline = bool(options.pop("baseline"))
+        ligands_path = options.pop("ligands")
         data = Path(str(options["data"])).expanduser()
         if data.suffix.lower() not in (".yml", ".yaml"):
             msg = "pointprobe takes a YAML file, which can hold pocket constraints."
@@ -337,6 +482,35 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
             msg = f"The binder {binder} is not a chain of the input."
             raise click.UsageError(msg)
         check_bonds(schema)
+        ligands, swap, record_ligands = None, None, None
+        if ligands_path is not None:
+            swap = find_swap(schema, binder)
+            check_swap_msa(schema, swap)
+            if swap.kind == "ligand":
+                # Each ligand names its atoms differently, as in a screen.
+                check_screen_bonds(schema, binder)
+            path = Path(str(ligands_path)).expanduser()
+            entries = name_ligands(read_ligands(path, (swap.field, "smiles")))
+            ligands, invalid = (
+                split_valid(entries)
+                if swap.kind == "ligand"
+                else split_valid_sequences(entries)
+            )
+            unreadable = (
+                "RDKit cannot read"
+                if swap.kind == "ligand"
+                else "not a protein sequence:"
+            )
+            for entry in invalid:
+                click.echo(f"Skipping {entry.name}: {unreadable} {entry.smiles}")
+            if not ligands:
+                msg = f"No entry of {path.name} is a " + (
+                    "SMILES RDKit can read."
+                    if swap.kind == "ligand"
+                    else "protein sequence."
+                )
+                raise click.UsageError(msg)
+            record_ligands = {}
         chains = chains_of_kind(schema, "protein")
         targets = parse_probe(spec, chains, binder)
         if not targets:
@@ -357,10 +531,24 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
         results, inputs_dir = results_paths(options, run, "pointprobe_inputs")
 
         share_msa(schema, name, results / "msa", options, compute_msa)
-        records = {f"{name}_{probe.chain}_{probe.resid}": probe for probe in probes}
+        pairs = (
+            [(None, probe) for probe in probes]
+            if ligands is None
+            else [(ligand, probe) for ligand in ligands for probe in probes]
+        )
+        records = {}
         inputs = {}
-        for record_id, probe in records.items():
+        for ligand, probe in pairs:
+            prefix = name if ligand is None else f"{name}_{ligand.name}"
+            record_id = f"{prefix}_{probe.chain}_{probe.resid}"
+            records[record_id] = probe
             variant = copy.deepcopy(schema)
+            if ligand is not None:
+                entry = variant["sequences"][swap.index][swap.kind]
+                if swap.kind == "ligand":
+                    entry.pop("ccd", None)
+                entry[swap.field] = swap.template.replace(PLACEHOLDER, ligand.smiles)
+                record_ligands[record_id] = ligand
             if not baseline:
                 variant["constraints"][template_index]["pocket"]["contacts"] = [
                     [probe.chain, resid] for resid in probe.contacts
@@ -371,16 +559,23 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
                 if not variant["constraints"]:
                     del variant["constraints"]
             inputs[record_id] = variant
+        if ligands is not None:
+            # write_inputs empties the folder, so check what is there first.
+            check_renamed_inputs(inputs_dir, inputs, swap)
         write_inputs(inputs, inputs_dir)
+        per_ligand = (
+            "" if ligands is None else f", each of {len(ligands)} ligand(s) in turn"
+        )
         if baseline:
             click.echo(
                 f"Pointprobe baseline: {len(records)} independent runs without the "
-                f"probed pocket, one per residue, measuring {binder}'s distance to "
-                f"each; {options['diffusion_samples']} structure(s) each."
+                f"probed pocket, one per residue{per_ligand}, measuring {binder}'s "
+                f"distance to each; {options['diffusion_samples']} structure(s) each."
             )
         else:
             click.echo(
-                f"Pointprobe: probing {len(records)} residues with {binder}, "
+                f"Pointprobe: probing {len(probes)} residues with {binder}"
+                f"{per_ligand}, {len(records)} run(s), "
                 f"{window} residue(s) per pocket, "
                 f"{options['diffusion_samples']} structure(s) each."
             )
@@ -397,6 +592,8 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
             ligand_smiles=binder_entry.get("smiles"),
             affinity_binder=binder in affinity_binders(schema),
             bonds=bond_constraints(schema),
+            ligands=record_ligands,
+            swapped=None if swap is None else swap.kind,
         )
         click.echo(f"Pointprobe summary written to {summary}.")
 
@@ -409,6 +606,7 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
             binder_option,
             window_option,
             baseline_option,
+            ligands_option,
         ],
         help=HELP,
         short_help="Probe every protein residue as a pocket for a ligand.",
