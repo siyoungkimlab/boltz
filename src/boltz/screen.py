@@ -287,9 +287,17 @@ def make_screen_command(predict: click.Command, compute_msa: Callable) -> click.
         type=click.Path(exists=True, dir_okay=False),
         required=True,
         help=(
-            "The ligands to screen: a .smi or .txt file with a SMILES and "
-            "optionally a name on each line, or a .csv file with a smiles and "
-            "optionally a name column."
+            "The ligands to screen, each swapped into the template's ligand "
+            "entry. The file is either:"
+            "\n\n\b\n"
+            "  a .csv with a smiles column and optionally a name column\n"
+            "    name,smiles\n"
+            "    lig_a,Oc1ccccc1\n"
+            "  or a .smi/.txt with one ligand per line, its name optional\n"
+            "    Oc1ccccc1 lig_a\n"
+            "\n"
+            "A ligand without a name is called lig_001, lig_002, and so on. "
+            "Blank lines and lines starting with # are skipped."
         ),
     )
     ligand_option = click.Option(

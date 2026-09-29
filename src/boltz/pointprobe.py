@@ -432,10 +432,19 @@ def make_pointprobe_command(  # noqa: C901, PLR0915
         type=click.Path(exists=True, dir_okay=False),
         default=None,
         help=(
-            "Probe with each ligand of a list, one after another: every residue "
-            "for every ligand. A .smi or .txt file with a SMILES and optionally a "
-            "name on each line, or a .csv file with a smiles and optionally a name "
-            "column. Each ligand is swapped into the probed binder."
+            "Probe with each ligand or peptide of a list, one after another: "
+            "every residue for every one of them, each swapped into the probed "
+            "binder, where {} marks the spot. The file is either:"
+            "\n\n\b\n"
+            "  a .csv with a smiles column, or sequence for peptides,\n"
+            "  and optionally a name column\n"
+            "    name,smiles\n"
+            "    lig_a,Oc1ccccc1\n"
+            "  or a .smi/.txt with one value per line, its name optional\n"
+            "    Oc1ccccc1 lig_a\n"
+            "\n"
+            "An entry without a name is called lig_001, lig_002, and so on. "
+            "Blank lines and lines starting with # are skipped."
         ),
     )
 
