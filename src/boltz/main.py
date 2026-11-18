@@ -41,6 +41,7 @@ from boltz.data.write.writer import (
 from boltz.model.models.boltz1 import Boltz1
 from boltz.model.models.boltz2 import Boltz2
 from boltz.pointprobe import make_pointprobe_command
+from boltz.regionprobe import make_regionprobe_command
 from boltz.screen import make_screen_command
 from boltz.timing import write_preprocessing_timing
 
@@ -1572,9 +1573,10 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         )
 
 
-# boltz pointprobe and boltz screen run boltz predict on many inputs made from
-# one, once per residue or per ligand, with its options
+# boltz pointprobe, boltz regionprobe and boltz screen run boltz predict on
+# many inputs made from one, once per residue, region or ligand, with its options
 cli.add_command(make_pointprobe_command(predict, compute_msa))
+cli.add_command(make_regionprobe_command(predict, compute_msa))
 cli.add_command(make_screen_command(predict, compute_msa))
 cli.add_command(atomname)
 
