@@ -37,6 +37,7 @@ from boltz.data.types import (
     Interface,
     PlanarBondConstraint,
     PlanarRing5Constraint,
+    MMFFTorsionConstraint,
     PlanarRing6Constraint,
     RDKitBoundsConstraint,
     Record,
@@ -128,6 +129,16 @@ class ParsedPlanarRing6Constraint:
 
 
 @dataclass(frozen=True)
+class ParsedMMFFTorsionConstraint:
+    """One MMFF torsion, with its three Fourier coefficients."""
+
+    atom_idxs: tuple[int, int, int, int]
+    v1: float
+    v2: float
+    v3: float
+
+
+@dataclass(frozen=True)
 class ParsedResidue:
     """A parsed residue object."""
 
@@ -147,6 +158,7 @@ class ParsedResidue:
     planar_bond_constraints: Optional[list[ParsedPlanarBondConstraint]] = None
     planar_ring_5_constraints: Optional[list[ParsedPlanarRing5Constraint]] = None
     planar_ring_6_constraints: Optional[list[ParsedPlanarRing6Constraint]] = None
+    mmff_torsion_constraints: Optional[list[ParsedMMFFTorsionConstraint]] = None
 
 
 @dataclass(frozen=True)
@@ -642,6 +654,83 @@ def get_mol(ccd: str, mols: dict, moldir: str) -> Mol:
 ####################################################################################################
 
 
+
+def compute_mmff_torsion_constraints(mol, idx_map):  # noqa: C901
+    """Every heavy-atom torsion of one molecule, with its MMFF V1/V2/V3.
+
+    Typing needs explicit hydrogens, so the molecule is H-added for the lookup
+    only; AddHs appends, so heavy-atom indices are unchanged and idx_map stays
+    valid. Torsions touching a hydrogen are dropped, since the model predicts
+    none, and so are torsions whose atoms are not all in idx_map.
+
+    Returns [] rather than raising if MMFF has no parameters for this molecule,
+    which is the right behaviour for an optional restraint.
+    """
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    try:
+        work = Chem.AddHs(mol, addCoords=True)
+        props = AllChem.MMFFGetMoleculeProperties(work)
+    except Exception:  # noqa: BLE001 - an untypeable ligand must not break parsing
+        return []
+    if props is None:
+        return []
+
+    constraints = []
+    seen = set()
+    for bond in work.GetBonds():
+        j, k = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        for first in work.GetAtomWithIdx(j).GetNeighbors():
+            i = first.GetIdx()
+            if i == k or work.GetAtomWithIdx(i).GetAtomicNum() == 1:
+                continue
+            for second in work.GetAtomWithIdx(k).GetNeighbors():
+                lll = second.GetIdx()
+                if lll in (i, j) or work.GetAtomWithIdx(lll).GetAtomicNum() == 1:
+                    continue
+                if any(x not in idx_map for x in (i, j, k, lll)):
+                    continue
+                key = (i, j, k, lll) if i < lll else (lll, k, j, i)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    params = props.GetMMFFTorsionParams(work, i, j, k, lll)
+                except Exception:  # noqa: BLE001
+                    params = None
+                if params is None:
+                    continue
+                # GetMMFFTorsionParams returns (torsionType, V1, V2, V3):
+                # the first element is an INTEGER type index, not a
+                # coefficient. Reading params[0:3] shifts everything by one,
+                # putting an aromatic ring's planarity-enforcing V2 into the V3
+                # slot -- and (1 + cos 3phi) is maximal at phi = 0 where
+                # (1 - cos 2phi) is minimal, so benzene is torn apart rather
+                # than flattened.
+                v1, v2, v3 = (float(params[1]), float(params[2]), float(params[3]))
+                if v1 == 0.0 and v2 == 0.0 and v3 == 0.0:
+                    continue
+                # Scope: every torsion about a ring bond, plus non-ring
+                # torsions whose V2 is positive (a planarity constraint such as
+                # an amide). A non-ring torsion with V2 <= 0 is a conformational
+                # preference with nothing to oppose it here, and it widens the
+                # distribution instead of sharpening it.
+                central = work.GetBondBetweenAtoms(j, k)
+                in_ring = central is not None and central.IsInRing()
+                if not in_ring and v2 <= 0.0:
+                    continue
+                constraints.append(
+                    ParsedMMFFTorsionConstraint(
+                        atom_idxs=(idx_map[i], idx_map[j], idx_map[k], idx_map[lll]),
+                        v1=v1,
+                        v2=v2,
+                        v3=v3,
+                    )
+                )
+    return constraints
+
+
 def parse_ccd_residue(
     name: str, ref_mol: Mol, res_idx: int, drop_leaving_atoms: bool = False
 ) -> Optional[ParsedResidue]:
@@ -773,6 +862,7 @@ def parse_ccd_residue(
     planar_bond_constraints, planar_ring_5_constraints, planar_ring_6_constraints = (
         compute_flatness_constraints(ref_mol, idx_map)
     )
+    mmff_torsion_constraints = compute_mmff_torsion_constraints(ref_mol, idx_map)
 
     unk_prot_id = const.unk_token_ids["PROTEIN"]
     return ParsedResidue(
@@ -792,6 +882,7 @@ def parse_ccd_residue(
         planar_bond_constraints=planar_bond_constraints,
         planar_ring_5_constraints=planar_ring_5_constraints,
         planar_ring_6_constraints=planar_ring_6_constraints,
+        mmff_torsion_constraints=mmff_torsion_constraints,
     )
 
 
@@ -1331,6 +1422,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     planar_bond_constraint_data = []
     planar_ring_5_constraint_data = []
     planar_ring_6_constraint_data = []
+    mmff_torsion_constraint_data = []
 
     # Convert parsed chains to tables
     atom_idx = 0
@@ -1456,6 +1548,19 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                                 c_atom_idx + atom_idx
                                 for c_atom_idx in constraint.atom_idxs
                             ),
+                        )
+                    )
+            if res.mmff_torsion_constraints is not None:
+                for constraint in res.mmff_torsion_constraints:
+                    mmff_torsion_constraint_data.append(  # noqa: PERF401
+                        (
+                            tuple(
+                                c_atom_idx + atom_idx
+                                for c_atom_idx in constraint.atom_idxs
+                            ),
+                            constraint.v1,
+                            constraint.v2,
+                            constraint.v3,
                         )
                     )
             if res.planar_ring_6_constraints is not None:
@@ -1751,6 +1856,9 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     planar_ring_6_constraints = np.array(
         planar_ring_6_constraint_data, dtype=PlanarRing6Constraint
     )
+    mmff_torsion_constraints = np.array(
+        mmff_torsion_constraint_data, dtype=MMFFTorsionConstraint
+    )
 
     if boltz_2:
         atom_data = [(a[0], a[3], a[5], 0.0, 1.0) for a in atom_data]
@@ -1823,6 +1931,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         planar_bond_constraints=planar_bond_constraints,
         planar_ring_5_constraints=planar_ring_5_constraints,
         planar_ring_6_constraints=planar_ring_6_constraints,
+        mmff_torsion_constraints=mmff_torsion_constraints,
     )
     return Target(
         record=record,

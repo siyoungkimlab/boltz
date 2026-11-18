@@ -621,6 +621,14 @@ PlanarRing6Constraint = [
 ]
 
 
+MMFFTorsionConstraint = [
+    ("atom_idxs", np.dtype("4i4")),
+    ("v1", np.dtype("f4")),
+    ("v2", np.dtype("f4")),
+    ("v3", np.dtype("f4")),
+]
+
+
 @dataclass(frozen=True)
 class ResidueConstraints(NumpySerializable):
     """ResidueConstraints datatype."""
@@ -631,6 +639,7 @@ class ResidueConstraints(NumpySerializable):
     planar_bond_constraints: np.ndarray
     planar_ring_5_constraints: np.ndarray
     planar_ring_6_constraints: np.ndarray
+    mmff_torsion_constraints: Optional[np.ndarray] = None
 
 
 ####################################################################################################
