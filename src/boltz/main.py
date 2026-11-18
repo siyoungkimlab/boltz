@@ -161,6 +161,10 @@ class BoltzSteeringParams:
     """Steering parameters."""
 
     fk_steering: bool = False
+    mmff_angle: bool = False
+    mmff_torsion: bool = False
+    mmff_angle_weight: float = 0.10
+    mmff_torsion_weight: float = 0.001
     num_particles: int = 3
     fk_lambda: float = 4.0
     fk_resampling_interval: int = 3
@@ -1063,6 +1067,45 @@ def cli() -> None:
     default=None,
 )
 @click.option(
+    "--mmff_torsion",
+    is_flag=True,
+    default=False,
+    help="Restrain every ligand torsion with the three-term MMFF form, "
+         "V1/V2/V3 taken from RDKit's MMFF typing. Unlike --mmff this changes "
+         "which conformer the ligand adopts, so it moves poses. Implies "
+         "--use_potentials.",
+)
+@click.option(
+    "--mmff_angle",
+    is_flag=True,
+    default=False,
+    help="Restrain every ligand bond angle to its reference-conformer value "
+         "with an MMFF-style cosine well, E = k (1 - cos(theta - theta0)). "
+         "Switches on the guidance loop, so it also enables the seven stock "
+         "potentials as --use_potentials does.",
+)
+@click.option(
+    "--mmff",
+    is_flag=True,
+    default=False,
+    help="Both MMFF terms: identical to --mmff_angle --mmff_torsion.",
+)
+@click.option(
+    "--mmff_angle_weight",
+    type=float,
+    default=0.10,
+    help="Guidance step size for the MMFF angle term. Its k is 1, so this is "
+         "the force directly; 0.10 matches ChiralAtomPotential.",
+)
+@click.option(
+    "--mmff_torsion_weight",
+    type=float,
+    default=0.001,
+    help="Guidance step size for the MMFF torsion term. NOT comparable to "
+         "--mmff_angle_weight: this multiplies MMFF's V coefficients, which "
+         "reach 7.0 for an aromatic ring, so 0.05 destroys geometry.",
+)
+@click.option(
     "--use_potentials",
     is_flag=True,
     help="Whether to use potentials for steering. Default is False.",
@@ -1195,6 +1238,11 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     api_key_header: Optional[str] = None,
     api_key_value: Optional[str] = None,
     use_potentials: bool = False,
+    mmff: bool = False,
+    mmff_angle: bool = False,
+    mmff_torsion: bool = False,
+    mmff_angle_weight: float = 0.10,
+    mmff_torsion_weight: float = 0.001,
     bond_guidance_weight: Optional[float] = None,
     chiral_guidance_weight: Optional[float] = None,
     stereo_bond_guidance_weight: Optional[float] = None,
@@ -1212,6 +1260,10 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     check_guidance_weights(
         {
             "use_potentials": use_potentials,
+            "mmff_angle": mmff or mmff_angle,
+            "mmff_torsion": mmff or mmff_torsion,
+            "mmff_angle_weight": mmff_angle_weight,
+            "mmff_torsion_weight": mmff_torsion_weight,
             "bond_guidance_weight": bond_guidance_weight,
             "chiral_guidance_weight": chiral_guidance_weight,
             "stereo_bond_guidance_weight": stereo_bond_guidance_weight,
@@ -1457,7 +1509,19 @@ def predict(  # noqa: C901, PLR0915, PLR0912
 
         steering_args = BoltzSteeringParams()
         steering_args.fk_steering = use_potentials
-        steering_args.physical_guidance_update = use_potentials
+        # --mmff is the convenience form for both terms. Either term needs
+        # the guidance loop, which only runs when physical_guidance_update is
+        # set -- and the seven stock potentials gate their weights on the same
+        # flag, so they come along with it.
+        mmff_angle_on = mmff or mmff_angle
+        mmff_torsion_on = mmff or mmff_torsion
+        steering_args.physical_guidance_update = (
+            use_potentials or mmff_angle_on or mmff_torsion_on
+        )
+        steering_args.mmff_angle = mmff_angle_on
+        steering_args.mmff_torsion = mmff_torsion_on
+        steering_args.mmff_angle_weight = mmff_angle_weight
+        steering_args.mmff_torsion_weight = mmff_torsion_weight
         if bond_guidance_weight is not None:
             steering_args.bond_guidance_weight = bond_guidance_weight
         if chiral_guidance_weight is not None:

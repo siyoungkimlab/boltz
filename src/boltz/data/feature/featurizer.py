@@ -989,6 +989,63 @@ def process_symmetry_features(
     return features
 
 
+
+def process_ligand_angle_features(
+    constraint_features: dict,
+    atom_features: dict,
+) -> dict:
+    """Ligand bond angles and their reference values, for MMFFAnglePotential.
+
+    Derived rather than stored: the bonded pairs are already in
+    rdkit_bounds_index under rdkit_bounds_bond_mask, and the reference geometry
+    is already in ref_pos, so no new constraint table or schema change is
+    needed. Scope is ligand-only for free, because compute_geometry_constraints
+    runs for non-standard residues only.
+
+    ref_pos carries a random roto-translation, which angles are invariant to.
+    """
+    empty = {
+        "ligand_angle_index": torch.empty((3, 0), dtype=torch.long),
+        "ligand_angle_theta0": torch.empty((0,), dtype=torch.float),
+    }
+    bond_index = constraint_features.get("rdkit_bounds_index")
+    bond_mask = constraint_features.get("rdkit_bounds_bond_mask")
+    ref_pos = atom_features.get("ref_pos")
+    if bond_index is None or bond_mask is None or ref_pos is None:
+        return empty
+    if bond_index.shape[1] == 0:
+        return empty
+
+    pairs = bond_index[:, bond_mask]
+    if pairs.shape[1] == 0:
+        return empty
+
+    neighbours: dict[int, set[int]] = {}
+    for first, second in zip(pairs[0].tolist(), pairs[1].tolist()):
+        neighbours.setdefault(first, set()).add(second)
+        neighbours.setdefault(second, set()).add(first)
+
+    triples = []
+    for vertex, around in neighbours.items():
+        ordered = sorted(around)
+        for i in range(len(ordered)):
+            for j in range(i + 1, len(ordered)):
+                triples.append((ordered[i], vertex, ordered[j]))
+    if not triples:
+        return empty
+
+    index = torch.tensor(sorted(triples), dtype=torch.long).T
+    coords = ref_pos if ref_pos.dim() == 2 else ref_pos.reshape(-1, 3)
+    u = coords.index_select(0, index[0]) - coords.index_select(0, index[1])
+    v = coords.index_select(0, index[2]) - coords.index_select(0, index[1])
+    uh = u / torch.linalg.norm(u, dim=-1, keepdim=True)
+    vh = v / torch.linalg.norm(v, dim=-1, keepdim=True)
+    theta0 = torch.atan2(
+        torch.linalg.norm(torch.cross(uh, vh, dim=-1), dim=-1), (uh * vh).sum(-1)
+    )
+    return {"ligand_angle_index": index, "ligand_angle_theta0": theta0.float()}
+
+
 def process_residue_constraint_features(
     data: Tokenized,
 ) -> dict[str, Tensor]:
@@ -1037,6 +1094,26 @@ def process_residue_constraint_features(
             stereo_bond_constraints["is_e"].copy(), dtype=torch.bool
         )
 
+        mmff_torsion_constraints = residue_constraints.mmff_torsion_constraints
+        if mmff_torsion_constraints is not None and len(mmff_torsion_constraints):
+            mmff_torsion_index = torch.tensor(
+                mmff_torsion_constraints["atom_idxs"].copy(), dtype=torch.long
+            ).T
+            mmff_torsion_v1 = torch.tensor(
+                mmff_torsion_constraints["v1"].copy(), dtype=torch.float
+            )
+            mmff_torsion_v2 = torch.tensor(
+                mmff_torsion_constraints["v2"].copy(), dtype=torch.float
+            )
+            mmff_torsion_v3 = torch.tensor(
+                mmff_torsion_constraints["v3"].copy(), dtype=torch.float
+            )
+        else:
+            mmff_torsion_index = torch.empty((4, 0), dtype=torch.long)
+            mmff_torsion_v1 = torch.empty((0,), dtype=torch.float)
+            mmff_torsion_v2 = torch.empty((0,), dtype=torch.float)
+            mmff_torsion_v3 = torch.empty((0,), dtype=torch.float)
+
         planar_bond_index = torch.tensor(
             planar_bond_constraints["atom_idxs"].copy(), dtype=torch.long
         ).T
@@ -1067,6 +1144,10 @@ def process_residue_constraint_features(
         planar_bond_index = torch.empty((6, 0), dtype=torch.long)
         planar_ring_5_index = torch.empty((5, 0), dtype=torch.long)
         planar_ring_6_index = torch.empty((6, 0), dtype=torch.long)
+        mmff_torsion_index = torch.empty((4, 0), dtype=torch.long)
+        mmff_torsion_v1 = torch.empty((0,), dtype=torch.float)
+        mmff_torsion_v2 = torch.empty((0,), dtype=torch.float)
+        mmff_torsion_v3 = torch.empty((0,), dtype=torch.float)
 
     return {
         "rdkit_bounds_index": rdkit_bounds_index,
@@ -1081,6 +1162,10 @@ def process_residue_constraint_features(
         "stereo_reference_mask": stereo_reference_mask,
         "stereo_bond_orientations": stereo_bond_orientations,
         "planar_bond_index": planar_bond_index,
+        "mmff_torsion_index": mmff_torsion_index,
+        "mmff_torsion_v1": mmff_torsion_v1,
+        "mmff_torsion_v2": mmff_torsion_v2,
+        "mmff_torsion_v3": mmff_torsion_v3,
         "planar_ring_5_index": planar_ring_5_index,
         "planar_ring_6_index": planar_ring_6_index,
     }
@@ -1214,6 +1299,11 @@ class BoltzFeaturizer:
         if compute_constraint_features:
             residue_constraint_features = process_residue_constraint_features(data)
             chain_constraint_features = process_chain_feature_constraints(data)
+            residue_constraint_features.update(
+                process_ligand_angle_features(
+                    residue_constraint_features, atom_features
+                )
+            )
 
         return {
             **token_features,
