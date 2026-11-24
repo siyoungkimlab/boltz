@@ -323,3 +323,52 @@ def build_topology(  # noqa: C901, PLR0912, PLR0915
             (atom_1, atom_2, order) for (atom_1, atom_2), order in sorted(bonds.items())
         ],
     )
+
+
+def add_hydrogens(
+    topology: Topology,
+    positions,
+    parents,
+) -> Topology:
+    """Append the steering hydrogens to a topology, bonded to their parents.
+
+    Each hydrogen joins its PARENT's residue and chain, which is what makes it
+    land in the ligand's own chain rather than a nameless one, and takes the
+    parent's B-factor. ``positions`` is [H, 3] and ``parents`` the parent atom
+    index of each hydrogen.
+
+    Names are ``H`` plus a per-residue counter, skipping names the residue
+    already uses, so nothing collides with a hydrogen the structure had.
+    """
+    if positions is None or parents is None:
+        return topology
+    n = len(topology.atoms)
+    used: dict[tuple[str, int], set] = {}
+    for atom in topology.atoms:
+        used.setdefault((atom.chain, atom.res_id), set()).add(atom.name)
+    for offset, (parent, xyz) in enumerate(zip(parents, positions)):
+        parent = int(parent)
+        if not 0 <= parent < n:
+            continue
+        host = topology.atoms[parent]
+        key = (host.chain, host.res_id)
+        taken = used.setdefault(key, set())
+        index = 1
+        while f"H{index}" in taken:
+            index += 1
+        name = f"H{index}"
+        taken.add(name)
+        topology.atoms.append(
+            TopologyAtom(
+                name=name,
+                atomic_number=1,
+                formal_charge=0,
+                coords=(float(xyz[0]), float(xyz[1]), float(xyz[2])),
+                res_name=host.res_name,
+                res_id=host.res_id,
+                chain=host.chain,
+                bfactor=host.bfactor,
+            )
+        )
+        topology.bonds.append((parent, n + offset, 1))
+    return topology

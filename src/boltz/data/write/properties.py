@@ -45,3 +45,27 @@ def confidence_properties(confidence: dict, structure: Structure) -> dict[str, f
         else:
             properties[f"boltz_{key}"] = float(value)
     return properties
+
+
+def steering_energy_properties(prediction: dict, model_idx: int) -> dict[str, float]:
+    """Per-term steering energies of one predicted structure, as properties.
+
+    The diffusion loop returns each term's unweighted energy per particle under
+    an ``E_<Term>`` key (see ligand_ff.steering_energies). Those become
+    ``boltz_E_<Term>`` here, so an MAE file carries ``r_boltz_E_GAFFTorsion``
+    and friends and a DMS file the matching columns -- the counterpart of
+    bioemu2's ``r_bioemu2_E_*``.
+
+    Values are in kcal/mol and are NOT multiplied by the guidance weights: the
+    weights are a steering choice, these are the force field's verdict on the
+    geometry.
+    """
+    properties = {}
+    for key, value in prediction.items():
+        if not key.startswith("E_"):
+            continue
+        try:
+            properties[f"boltz_{key}"] = float(value[model_idx])
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+    return properties

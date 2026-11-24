@@ -1,5 +1,6 @@
+import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -37,6 +38,17 @@ from boltz.data.types import (
     Interface,
     PlanarBondConstraint,
     PlanarRing5Constraint,
+    GAFF14Constraint,
+    GAFFAngleConstraint,
+    GAFFBondConstraint,
+    GAFFHydrogenConstraint,
+    GAFFNonbondedConstraint,
+    GAFFTorsionConstraint,
+    MMFF14Constraint,
+    MMFFAngleConstraint,
+    MMFFBondConstraint,
+    MMFFHydrogenConstraint,
+    MMFFNonbondedConstraint,
     MMFFTorsionConstraint,
     PlanarRing6Constraint,
     RDKitBoundsConstraint,
@@ -128,14 +140,59 @@ class ParsedPlanarRing6Constraint:
     atom_idxs: tuple[int, int, int, int, int, int]
 
 
-@dataclass(frozen=True)
-class ParsedMMFFTorsionConstraint:
-    """One MMFF torsion, with its three Fourier coefficients."""
 
-    atom_idxs: tuple[int, int, int, int]
-    v1: float
-    v2: float
-    v3: float
+#: Elements the ligand force fields are allowed to steer. MMFF94 does type
+#: silicon and a few metal cations, but they are left unsteered here too, so all
+#: three force fields steer the same elements and a system's steered atoms do
+#: not depend on which one is chosen.
+LIGAND_FF_ELEMENTS = frozenset(
+    {"H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"}
+)
+
+#: Ligands already reported as unsteerable, so the warning is once per run.
+_LIGAND_FF_WARNED: set = set()
+
+
+def unsupported_ligand_reason(mol, allowed=LIGAND_FF_ELEMENTS):
+    """Why this ligand cannot carry force-field terms, or None if it can.
+
+    A monatomic ion or metal (Zn2+, Na+, Cl-) has no bonded terms, no hydrogens
+    to add and no GAFF or MMFF atom type; an element outside ``allowed`` has no
+    parameters either. Such a ligand is skipped so the rest of the system is
+    still steered, rather than failing the whole run -- but it is reported,
+    because an unsteered ligand that looks steered is the worst outcome here.
+    """
+    if mol is None:
+        return "RDKit cannot parse the ligand"
+    if mol.GetNumAtoms() == 1:
+        return "monatomic ion or metal"
+    if allowed is not None:
+        bad = sorted(
+            {a.GetSymbol() for a in mol.GetAtoms() if a.GetSymbol() not in allowed}
+        )
+        if bad:
+            return "no parameters for " + ", ".join(bad)
+    return None
+
+
+@dataclass(frozen=True)
+class ParsedLigandFF:
+    """Ligand force-field terms for one residue, for the steering presets.
+
+    Atom indices are already global (``idx_map`` applied), except that a
+    reconstructed hydrogen is stored as -(ordinal + 1), indexing ``hydrogens``.
+    The featurizer resolves those against the padded atom width, which is not
+    known here. See data/types.py for why hydrogens are kept rather than
+    dropped.
+    """
+
+    family: str  # "gaff" (GAFF2 and OpenFF share the forms) or "mmff"
+    bonds: list = field(default_factory=list)
+    angles: list = field(default_factory=list)
+    torsions: list = field(default_factory=list)
+    pairs14: list = field(default_factory=list)
+    nonbonded: list = field(default_factory=list)
+    hydrogens: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -158,7 +215,7 @@ class ParsedResidue:
     planar_bond_constraints: Optional[list[ParsedPlanarBondConstraint]] = None
     planar_ring_5_constraints: Optional[list[ParsedPlanarRing5Constraint]] = None
     planar_ring_6_constraints: Optional[list[ParsedPlanarRing6Constraint]] = None
-    mmff_torsion_constraints: Optional[list[ParsedMMFFTorsionConstraint]] = None
+    ligand_ff: Optional[ParsedLigandFF] = None
 
 
 @dataclass(frozen=True)
@@ -655,84 +712,208 @@ def get_mol(ccd: str, mols: dict, moldir: str) -> Mol:
 
 
 
-def compute_mmff_torsion_constraints(mol, idx_map):  # noqa: C901
-    """Every heavy-atom torsion of one molecule, with its MMFF V1/V2/V3.
+def compute_ligand_ff_constraints(mol, idx_map, ligand_ff):  # noqa: C901
+    """Force-field terms for one ligand, or None when there are none to add.
 
-    Typing needs explicit hydrogens, so the molecule is H-added for the lookup
-    only; AddHs appends, so heavy-atom indices are unchanged and idx_map stays
-    valid. Torsions touching a hydrogen are dropped, since the model predicts
-    none, and so are torsions whose atoms are not all in idx_map.
+    ``ligand_ff`` is "mmff", "gaff2" or an OpenFF release such as
+    "openff-2.2.1". MMFF is typed by RDKit on the spot; GAFF2 and OpenFF are
+    read from the parameter cache that boonza writes, and a cache miss returns
+    None rather than failing the prediction -- warm it where boonza and
+    AmberTools are installed.
 
-    Returns [] rather than raising if MMFF has no parameters for this molecule,
-    which is the right behaviour for an optional restraint.
+    gaff2 and openff-2.2.1 are NOT interchangeable: they key different cache
+    entries, which is why the force field has to be chosen before parsing
+    rather than selected at sampling time.
     """
-    from rdkit import Chem
-    from rdkit.Chem import AllChem
+    if not ligand_ff:
+        return None
 
     try:
-        work = Chem.AddHs(mol, addCoords=True)
-        props = AllChem.MMFFGetMoleculeProperties(work)
-    except Exception:  # noqa: BLE001 - an untypeable ligand must not break parsing
-        return []
-    if props is None:
-        return []
+        from rdkit import Chem
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        heavy = Chem.RemoveHs(Chem.Mol(mol))
+    except Exception:  # noqa: BLE001
+        return None
 
-    constraints = []
-    seen = set()
-    for bond in work.GetBonds():
-        j, k = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        for first in work.GetAtomWithIdx(j).GetNeighbors():
-            i = first.GetIdx()
-            if i == k or work.GetAtomWithIdx(i).GetAtomicNum() == 1:
-                continue
-            for second in work.GetAtomWithIdx(k).GetNeighbors():
-                lll = second.GetIdx()
-                if lll in (i, j) or work.GetAtomWithIdx(lll).GetAtomicNum() == 1:
-                    continue
-                if any(x not in idx_map for x in (i, j, k, lll)):
-                    continue
-                key = (i, j, k, lll) if i < lll else (lll, k, j, i)
-                if key in seen:
-                    continue
-                seen.add(key)
-                try:
-                    params = props.GetMMFFTorsionParams(work, i, j, k, lll)
-                except Exception:  # noqa: BLE001
-                    params = None
-                if params is None:
-                    continue
-                # GetMMFFTorsionParams returns (torsionType, V1, V2, V3):
-                # the first element is an INTEGER type index, not a
-                # coefficient. Reading params[0:3] shifts everything by one,
-                # putting an aromatic ring's planarity-enforcing V2 into the V3
-                # slot -- and (1 + cos 3phi) is maximal at phi = 0 where
-                # (1 - cos 2phi) is minimal, so benzene is torn apart rather
-                # than flattened.
-                v1, v2, v3 = (float(params[1]), float(params[2]), float(params[3]))
-                if v1 == 0.0 and v2 == 0.0 and v3 == 0.0:
-                    continue
-                # Scope: every torsion about a ring bond, plus non-ring
-                # torsions whose V2 is positive (a planarity constraint such as
-                # an amide). A non-ring torsion with V2 <= 0 is a conformational
-                # preference with nothing to oppose it here, and it widens the
-                # distribution instead of sharpening it.
-                central = work.GetBondBetweenAtoms(j, k)
-                in_ring = central is not None and central.IsInRing()
-                if not in_ring and v2 <= 0.0:
-                    continue
-                constraints.append(
-                    ParsedMMFFTorsionConstraint(
-                        atom_idxs=(idx_map[i], idx_map[j], idx_map[k], idx_map[lll]),
-                        v1=v1,
-                        v2=v2,
-                        v3=v3,
-                    )
+    # Gate on the elements BEFORE consulting any cache: an unsupported ligand
+    # otherwise just misses the cache and contributes nothing, which is
+    # indistinguishable from a force field that had no opinion.
+    reason = unsupported_ligand_reason(heavy)
+    if reason is not None:
+        try:
+            key = Chem.MolToSmiles(heavy)
+        except Exception:  # noqa: BLE001
+            key = None
+        if key not in _LIGAND_FF_WARNED:
+            _LIGAND_FF_WARNED.add(key)
+            click.echo(
+                f"WARNING: {ligand_ff} cannot steer ligand {key or '<unknown>'}: "
+                f"{reason}. It is left unsteered; the rest of the system is "
+                f"still steered."
+            )
+        return None
+
+    family = "mmff" if ligand_ff == "mmff" else "gaff"
+    canon_to_local = None
+    if family == "mmff":
+        from boltz.model.potentials.mmff_cache import terms_for
+
+        data = terms_for(heavy)
+    else:
+        from boltz.model.potentials.gaff_cache import map_to, parameters_for
+
+        try:
+            smiles = Chem.MolToSmiles(heavy)
+        except Exception:  # noqa: BLE001
+            return None
+        # allow_compute=True matches BioEmu2, which parameterizes on the fly
+        # when boonza and AmberTools are importable; gaff_cache already warns
+        # and returns None when they are not, so an unwarmed cache in an
+        # environment without boonza costs the terms, not the prediction.
+        data = parameters_for(smiles, allow_compute=True, ligand_ff=ligand_ff)
+        if data is not None:
+            canon_to_local = map_to(heavy, data)
+            if canon_to_local is None:
+                return None
+    if data is None:
+        return None
+
+    n_heavy = data.get("n_heavy")
+    if n_heavy is None:
+        return None
+
+    # Hydrogens, in the order the parameterization lists them: that order is the
+    # ordinal the negative indices refer to, and the order the featurizer emits.
+    h_rows = data.get("hydrogens", []) or []
+    h_ordinal = {int(e["index"]): pos for pos, e in enumerate(h_rows)}
+
+    def resolve_one(u):
+        u = int(u)
+        if u in h_ordinal:
+            return -(h_ordinal[u] + 1)
+        local = u if canon_to_local is None else canon_to_local.get(u)
+        if local is None or local not in idx_map:
+            return None
+        return idx_map[local]
+
+    def resolve(ids):
+        out = []
+        for u in ids:
+            got = resolve_one(u)
+            if got is None:
+                return None
+            out.append(got)
+        return tuple(out)
+
+    hydrogens = []
+    for e in h_rows:
+        parent = resolve_one(e["parent"])
+        if parent is None or parent < 0:
+            # A hydrogen whose parent is not a predicted atom cannot be placed;
+            # keeping a row for it would shift every later ordinal, so bail out
+            # rather than silently mis-index the torsions that name it.
+            return None
+        hydrogens.append((parent, float(e["r"])))
+
+    deg = math.radians
+
+    bonds = []
+    for i, j, r0, fc in data.get("bonds", []):
+        got = resolve((i, j))
+        if got is not None:
+            bonds.append((got, float(r0), float(fc)))
+
+    angles = []
+    for i, k, centre, theta0, fc in data.get("angles", []):
+        # (outer, outer, CENTRE): the vertex is the THIRD index, which is what
+        # ligand_ff's angle terms expect. Boltz's own AngleMixin puts the vertex
+        # SECOND, so these arrays are not interchangeable with its.
+        got = resolve((i, k, centre))
+        if got is not None:
+            # MMFF typing already returns radians; the GAFF cache stores degrees.
+            t0 = float(theta0) if family == "mmff" else deg(float(theta0))
+            angles.append((got, t0, float(fc)))
+
+    torsions = []
+    if family == "mmff":
+        for i, j, k, l, v1, v2, v3 in data.get("torsions", []):
+            got = resolve((i, j, k, l))
+            if got is not None:
+                torsions.append((got, float(v1), float(v2), float(v3)))
+    else:
+        for i, j, k, l, phi0, fcs in data.get("torsions", []):
+            got = resolve((i, j, k, l))
+            if got is not None:
+                torsions.append(
+                    (got, deg(float(phi0)), tuple(float(v) for v in fcs))
                 )
-    return constraints
+
+    # 1-4 pairs: both force fields store these as pairs with the force field's
+    # own scaling already applied.
+    pairs14 = []
+    for a, b, x, y, q in data.get("pairs", []) or []:
+        got = resolve((a, b))
+        if got is not None:
+            pairs14.append((got, float(x), float(y), float(q)))
+
+    # Full nonbonded. The two force fields store this differently: MMFF typing
+    # yields ready-made pairs, while the GAFF cache stores PER-ATOM sigma,
+    # epsilon and charge plus an exclusion list, so the pairs and the combining
+    # rules are built here -- Lorentz-Berthelot, exactly as bioemu2 does it.
+    nonbonded = []
+    if family == "mmff":
+        for a, b, x, y, q in data.get("nonbonded", []) or []:
+            got = resolve((a, b))
+            if got is not None:
+                nonbonded.append((got, float(x), float(y), float(q)))
+    else:
+        nb_param = {}
+        for row in data.get("nonbonded", []) or []:
+            canon, sig, eps_i, q = row
+            got = resolve_one(canon)
+            if got is not None:
+                nb_param[got] = (float(sig), float(eps_i), float(q))
+        excluded = set()
+        for a_i, b_i in data.get("exclusions", []) or []:
+            ga, gb = resolve_one(a_i), resolve_one(b_i)
+            if ga is not None and gb is not None:
+                excluded.add((min(ga, gb), max(ga, gb)))
+        present = sorted(nb_param)
+        for x_i in range(len(present)):
+            for y_i in range(x_i + 1, len(present)):
+                i_idx, j_idx = present[x_i], present[y_i]
+                if (min(i_idx, j_idx), max(i_idx, j_idx)) in excluded:
+                    continue
+                s_i, e_i, q_i = nb_param[i_idx]
+                s_j, e_j, q_j = nb_param[j_idx]
+                nonbonded.append((
+                    (i_idx, j_idx),
+                    0.5 * (s_i + s_j),
+                    (max(e_i, 0.0) * max(e_j, 0.0)) ** 0.5,
+                    q_i * q_j,
+                ))
+
+    if not any((bonds, angles, torsions, pairs14, nonbonded)):
+        return None
+    return ParsedLigandFF(
+        family=family,
+        bonds=bonds,
+        angles=angles,
+        torsions=torsions,
+        pairs14=pairs14,
+        nonbonded=nonbonded,
+        hydrogens=hydrogens,
+    )
 
 
 def parse_ccd_residue(
-    name: str, ref_mol: Mol, res_idx: int, drop_leaving_atoms: bool = False
+    name: str,
+    ref_mol: Mol,
+    res_idx: int,
+    drop_leaving_atoms: bool = False,
+    ligand_ff: Optional[str] = None,
 ) -> Optional[ParsedResidue]:
     """Parse an MMCIF ligand.
 
@@ -862,7 +1043,8 @@ def parse_ccd_residue(
     planar_bond_constraints, planar_ring_5_constraints, planar_ring_6_constraints = (
         compute_flatness_constraints(ref_mol, idx_map)
     )
-    mmff_torsion_constraints = compute_mmff_torsion_constraints(ref_mol, idx_map)
+
+    ligand_ff_terms = compute_ligand_ff_constraints(ref_mol, idx_map, ligand_ff)
 
     unk_prot_id = const.unk_token_ids["PROTEIN"]
     return ParsedResidue(
@@ -882,7 +1064,7 @@ def parse_ccd_residue(
         planar_bond_constraints=planar_bond_constraints,
         planar_ring_5_constraints=planar_ring_5_constraints,
         planar_ring_6_constraints=planar_ring_6_constraints,
-        mmff_torsion_constraints=mmff_torsion_constraints,
+        ligand_ff=ligand_ff_terms,
     )
 
 
@@ -1035,6 +1217,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     ccd: Mapping[str, Mol],
     mol_dir: Optional[Path] = None,
     boltz_2: bool = False,
+    ligand_ff: Optional[str] = None,
 ) -> Target:
     """Parse a Boltz input yaml / json.
 
@@ -1306,6 +1489,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                     name=code,
                     ref_mol=ref_mol,
                     res_idx=res_idx,
+                    ligand_ff=ligand_ff,
                 )
                 residues.append(residue)
 
@@ -1368,6 +1552,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                 name=f"LIG{ligand_id}",
                 ref_mol=mol,
                 res_idx=0,
+                ligand_ff=ligand_ff,
             )
 
             ligand_id += 1
@@ -1422,7 +1607,13 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     planar_bond_constraint_data = []
     planar_ring_5_constraint_data = []
     planar_ring_6_constraint_data = []
-    mmff_torsion_constraint_data = []
+    ligand_ff_data = {k: [] for k in (
+        "gaff_bond", "gaff_angle", "gaff_torsion", "gaff_pair14",
+        "gaff_nonbonded", "gaff_hydrogen", "mmff_bond", "mmff_angle",
+        "mmff_torsion", "mmff_pair14", "mmff_nonbonded", "mmff_hydrogen")}
+    # Hydrogen ordinals are per residue; the arrays are global, so each
+    # residue's are shifted past the hydrogens already collected.
+    ligand_ff_h_offset = {"gaff": 0, "mmff": 0}
 
     # Convert parsed chains to tables
     atom_idx = 0
@@ -1550,19 +1741,6 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                             ),
                         )
                     )
-            if res.mmff_torsion_constraints is not None:
-                for constraint in res.mmff_torsion_constraints:
-                    mmff_torsion_constraint_data.append(  # noqa: PERF401
-                        (
-                            tuple(
-                                c_atom_idx + atom_idx
-                                for c_atom_idx in constraint.atom_idxs
-                            ),
-                            constraint.v1,
-                            constraint.v2,
-                            constraint.v3,
-                        )
-                    )
             if res.planar_ring_6_constraints is not None:
                 for constraint in res.planar_ring_6_constraints:
                     planar_ring_6_constraint_data.append(  # noqa: PERF401
@@ -1573,6 +1751,48 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                             ),
                         )
                     )
+            if res.ligand_ff is not None:
+                ff = res.ligand_ff
+                h_shift = ligand_ff_h_offset[ff.family]
+
+                def _shift(idxs, h_shift=h_shift, atom_idx=atom_idx):
+                    # A negative index names a reconstructed hydrogen by
+                    # ordinal and must NOT take the chain's atom offset; it
+                    # takes the running hydrogen offset instead.
+                    return tuple(
+                        i - h_shift if i < 0 else i + atom_idx for i in idxs
+                    )
+
+                for idxs, r0, fc in ff.bonds:
+                    ligand_ff_data[f"{ff.family}_bond"].append(
+                        (_shift(idxs), r0, fc)
+                    )
+                for idxs, theta0, fc in ff.angles:
+                    ligand_ff_data[f"{ff.family}_angle"].append(
+                        (_shift(idxs), theta0, fc)
+                    )
+                for row in ff.torsions:
+                    if ff.family == "gaff":
+                        idxs, phi0, fcs = row
+                        ligand_ff_data["gaff_torsion"].append(
+                            (_shift(idxs), phi0, fcs)
+                        )
+                    else:
+                        idxs, v1, v2, v3 = row
+                        ligand_ff_data["mmff_torsion"].append(
+                            (_shift(idxs), v1, v2, v3)
+                        )
+                for tag, rows in (("pair14", ff.pairs14),
+                                  ("nonbonded", ff.nonbonded)):
+                    for idxs, x, y, q in rows:
+                        ligand_ff_data[f"{ff.family}_{tag}"].append(
+                            (_shift(idxs), x, y, q)
+                        )
+                for parent, r in ff.hydrogens:
+                    ligand_ff_data[f"{ff.family}_hydrogen"].append(
+                        (_shift((parent,))[0], r)
+                    )
+                ligand_ff_h_offset[ff.family] += len(ff.hydrogens)
 
             for bond in res.bonds:
                 atom_1 = atom_idx + bond.atom_1
@@ -1856,9 +2076,6 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     planar_ring_6_constraints = np.array(
         planar_ring_6_constraint_data, dtype=PlanarRing6Constraint
     )
-    mmff_torsion_constraints = np.array(
-        mmff_torsion_constraint_data, dtype=MMFFTorsionConstraint
-    )
 
     if boltz_2:
         atom_data = [(a[0], a[3], a[5], 0.0, 1.0) for a in atom_data]
@@ -1924,6 +2141,33 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         affinity=affinity_info,
     )
 
+    ligand_ff_arrays = {
+        "gaff_bond_constraints": np.array(
+            ligand_ff_data["gaff_bond"], dtype=GAFFBondConstraint),
+        "gaff_angle_constraints": np.array(
+            ligand_ff_data["gaff_angle"], dtype=GAFFAngleConstraint),
+        "gaff_torsion_constraints": np.array(
+            ligand_ff_data["gaff_torsion"], dtype=GAFFTorsionConstraint),
+        "gaff_pair14_constraints": np.array(
+            ligand_ff_data["gaff_pair14"], dtype=GAFF14Constraint),
+        "gaff_nonbonded_constraints": np.array(
+            ligand_ff_data["gaff_nonbonded"], dtype=GAFFNonbondedConstraint),
+        "gaff_hydrogen_constraints": np.array(
+            ligand_ff_data["gaff_hydrogen"], dtype=GAFFHydrogenConstraint),
+        "mmff_bond_constraints": np.array(
+            ligand_ff_data["mmff_bond"], dtype=MMFFBondConstraint),
+        "mmff_angle_constraints": np.array(
+            ligand_ff_data["mmff_angle"], dtype=MMFFAngleConstraint),
+        "mmff_torsion_constraints": np.array(
+            ligand_ff_data["mmff_torsion"], dtype=MMFFTorsionConstraint),
+        "mmff_pair14_constraints": np.array(
+            ligand_ff_data["mmff_pair14"], dtype=MMFF14Constraint),
+        "mmff_nonbonded_constraints": np.array(
+            ligand_ff_data["mmff_nonbonded"], dtype=MMFFNonbondedConstraint),
+        "mmff_hydrogen_constraints": np.array(
+            ligand_ff_data["mmff_hydrogen"], dtype=MMFFHydrogenConstraint),
+    }
+
     residue_constraints = ResidueConstraints(
         rdkit_bounds_constraints=rdkit_bounds_constraints,
         chiral_atom_constraints=chiral_atom_constraints,
@@ -1931,7 +2175,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         planar_bond_constraints=planar_bond_constraints,
         planar_ring_5_constraints=planar_ring_5_constraints,
         planar_ring_6_constraints=planar_ring_6_constraints,
-        mmff_torsion_constraints=mmff_torsion_constraints,
+        **ligand_ff_arrays,
     )
     return Target(
         record=record,

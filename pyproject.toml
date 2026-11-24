@@ -38,6 +38,14 @@ dependencies = [
 boltz = "boltz.main:cli"
 
 [project.optional-dependencies]
+# GAFF2 and OpenFF ligand steering: boonza parameterizes the ligand from its
+# SMILES, calling AmberTools' antechamber for AM1-BCC charges, which conda
+# provides and pip cannot. Sampling only reads the parameter cache, so these are
+# needed where the cache is warmed, not where predictions run. The MMFF terms
+# need neither.
+ligand-ff = [
+    "boonza @ git+https://github.com/siyoungkimlab/boonza",
+]
 lint = ["ruff"]
 test = ["pytest", "requests"]
 cuda = [

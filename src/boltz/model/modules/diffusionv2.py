@@ -32,6 +32,11 @@ from boltz.model.modules.utils import (
     default,
     log,
 )
+from boltz.model.potentials.ligand_ff import (
+    get_ligand_potentials,
+    reconstructed_hydrogens,
+    steering_energies,
+)
 from boltz.model.potentials.potentials import get_potentials
 
 
@@ -306,7 +311,18 @@ class AtomDiffusion(Module):
             or steering_args["physical_guidance_update"]
             or steering_args["contact_guidance_update"]
         ):
-            potentials = get_potentials(steering_args, boltz2=True)
+            ligand_ff = steering_args.get("ligand_ff")
+            if ligand_ff:
+                # --sampler gaff2 / openff-2.2.1 / mmff: the physicality set
+                # without the three terms that override a ligand force field,
+                # plus that force field's own bond, angle, 1-4, nonbonded and
+                # torsion terms at the benchmarked weights.
+                potentials = get_ligand_potentials(
+                    steering_args, ligand_ff, boltz2=True,
+                    **(steering_args.get("ligand_ff_overrides") or {}),
+                )
+            else:
+                potentials = get_potentials(steering_args, boltz2=True)
 
         if steering_args["fk_steering"]:
             multiplicity = multiplicity * steering_args["num_particles"]
@@ -323,6 +339,44 @@ class AtomDiffusion(Module):
                 dtype=torch.float32,
                 device=self.device,
             )
+        # Langevin guidance: each guidance step adds sqrt(2 w kT) angstrom of
+        # Gaussian noise per coordinate, so particles sample exp(-E/kT) of the
+        # terms guided at w instead of sliding into the nearest minimum. Plain
+        # descent returns one geometry per seed rather than a population.
+        langevin_kT = steering_args.get("langevin_kT") if steering_args else None
+        langevin_weight = (
+            steering_args.get("langevin_weight") if steering_args else None
+        )
+        langevin_t_on = (
+            steering_args.get("langevin_t_on", 1.0) if steering_args else 1.0
+        )
+        # The kick that lands in the OUTPUT is the one injected at the last
+        # guided steps, where sigma ~ 0 and the EDM preconditioning makes
+        # x0_hat ~ identity on its input -- there is no restoring force left,
+        # so that deformation cannot be repaired. Measured on pyridylphenol at
+        # step 198 of 200: bioemu2's x0_hat arrives at 0.067 A and plateaus
+        # under the drift, Boltz's arrives at 0.370 A and keeps rising.
+        # langevin_t_off stops the noise below a given t, leaving the remaining
+        # denoising steps to pull the bonds back; langevin_anneal instead fades
+        # the kick with sigma, which is where the model's ability to repair goes.
+        langevin_t_off = (
+            steering_args.get("langevin_t_off", 0.0) if steering_args else 0.0
+        )
+        langevin_anneal = bool(
+            steering_args.get("langevin_anneal", False) if steering_args else False
+        )
+        if langevin_kT is not None and langevin_kT == 0:
+            langevin_kT = None          # -S langevin_kT=0 means plain descent
+        if langevin_kT is not None:
+            if not langevin_kT > 0:
+                raise ValueError("langevin_kT must be positive (kcal/mol) or None")
+            if langevin_weight is None or not langevin_weight > 0:
+                raise ValueError("langevin_kT needs a positive langevin_weight")
+        langevin_std = (
+            sqrt(2.0 * langevin_weight * langevin_kT)
+            if langevin_kT is not None
+            else 0.0
+        )
         if max_parallel_samples is None:
             max_parallel_samples = multiplicity
 
@@ -432,12 +486,28 @@ class AtomDiffusion(Module):
                     else:
                         ll_difference = torch.zeros_like(energy)
 
-                    # Compute resampling weights
+                    # Compute resampling weights. The group is num_particles by
+                    # default, as Boltz has always done; resampling_group_size=0
+                    # makes it the whole batch, so every particle competes.
+                    group_size = steering_args.get("resampling_group_size")
+                    if group_size == 0:
+                        group_size = multiplicity        # one global group
+                    elif not group_size:
+                        group_size = steering_args["num_particles"]
+                    unnormalized = (
+                        ll_difference + steering_args["fk_lambda"] * log_G
+                    )
+                    # A non-finite energy would poison its whole group's
+                    # softmax, and with ONE global group that is every particle
+                    # rather than a few. Clamp it to a weight that survives
+                    # normalization but loses every resample.
+                    unnormalized = torch.where(
+                        torch.isfinite(unnormalized),
+                        unnormalized,
+                        unnormalized.new_full((), -1e4),
+                    )
                     resample_weights = F.softmax(
-                        (ll_difference + steering_args["fk_lambda"] * log_G).reshape(
-                            -1, steering_args["num_particles"]
-                        ),
-                        dim=1,
+                        unnormalized.reshape(-1, group_size), dim=1
                     )
 
                 # Compute guidance update to x_0 prediction
@@ -446,6 +516,25 @@ class AtomDiffusion(Module):
                     or steering_args["contact_guidance_update"]
                 ) and step_idx < num_sampling_steps - 1:
                     guidance_update = torch.zeros_like(atom_coords_denoised)
+                    # The FK likelihood correction must see the DRIFT only: the
+                    # thermal kick is not part of the guided transition, so
+                    # folding it in would bias every resampling weight.
+                    guidance_drift = torch.zeros_like(atom_coords_denoised)
+                    langevin_now = (
+                        langevin_std > 0
+                        and steering_t <= langevin_t_on
+                        and steering_t >= langevin_t_off
+                    )
+                    # Fade with sigma: at sigma_data the kick is full, and it
+                    # vanishes as the trajectory converges.
+                    langevin_scale = (
+                        min(1.0, float(sigma_tm) / self.sigma_data)
+                        if (langevin_now and langevin_anneal)
+                        else 1.0
+                    )
+                    if langevin_now:
+                        # Real atoms only: padding stays where the model put it.
+                        real = atom_mask[..., None].to(atom_coords_denoised.dtype)
                     for guidance_step in range(steering_args["num_gd_steps"]):
                         energy_gradient = torch.zeros_like(atom_coords_denoised)
                         for potential in potentials:
@@ -463,9 +552,19 @@ class AtomDiffusion(Module):
                                     parameters,
                                 )
                         guidance_update -= energy_gradient
+                        guidance_drift -= energy_gradient
+                        if langevin_now:
+                            # Unadjusted Langevin: a thermal kick of
+                            # sqrt(2 w kT) per coordinate.
+                            guidance_update = guidance_update + (
+                                langevin_std
+                                * langevin_scale
+                                * real
+                                * torch.randn_like(guidance_update)
+                            )
                     atom_coords_denoised += guidance_update
                     scaled_guidance_update = (
-                        guidance_update
+                        guidance_drift
                         * -1
                         * self.step_scale
                         * (sigma_t - t_hat)
@@ -479,12 +578,18 @@ class AtomDiffusion(Module):
                     )
                     or step_idx == num_sampling_steps - 1
                 ):
+                    # The last step keeps one particle per output sample: with
+                    # Boltz's own grouping that is 1 per group, and with one
+                    # global group it is the whole sample count.
+                    keep = (
+                        resample_weights.shape[1]
+                        if step_idx < num_sampling_steps - 1
+                        else resample_weights.shape[1] // steering_args["num_particles"]
+                    )
                     resample_indices = (
                         torch.multinomial(
                             resample_weights,
-                            resample_weights.shape[1]
-                            if step_idx < num_sampling_steps - 1
-                            else 1,
+                            keep,
                             replacement=True,
                         )
                         + resample_weights.shape[1]
@@ -527,7 +632,37 @@ class AtomDiffusion(Module):
 
             atom_coords = atom_coords_next
 
-        return dict(sample_atom_coords=atom_coords, diff_token_repr=token_repr)
+        # Per-term steering energies of the returned structures, so a run can
+        # be scored without rerunning the model (see ligand_ff.steering_energies).
+        energies = {}
+        if steering_args is not None and (
+            steering_args["fk_steering"] or steering_args["physical_guidance_update"]
+        ):
+            energies = {
+                f"E_{name}": value
+                for name, value in steering_energies(
+                    potentials, atom_coords.float(),
+                    network_condition_kwargs["feats"], 0.0,
+                ).items()
+            }
+        # The steering hydrogens of the returned structures, so the writer can
+        # include them: the models predict heavy atoms only, but the force field
+        # was evaluated with hydrogens, and a structure without them cannot be
+        # re-scored or inspected against what actually steered it.
+        hydrogen_coords, hydrogen_parents = None, None
+        if steering_args is not None and steering_args.get("ligand_ff"):
+            hydrogen_coords, hydrogen_parents = reconstructed_hydrogens(
+                potentials, atom_coords.float(), network_condition_kwargs["feats"]
+            )
+        out = dict(
+            sample_atom_coords=atom_coords,
+            diff_token_repr=token_repr,
+            **energies,
+        )
+        if hydrogen_coords is not None:
+            out["hydrogen_coords"] = hydrogen_coords
+            out["hydrogen_parents"] = hydrogen_parents
+        return out
 
     def loss_weight(self, sigma):
         return (sigma**2 + self.sigma_data**2) / ((sigma * self.sigma_data) ** 2)

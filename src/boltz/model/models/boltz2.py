@@ -1079,6 +1079,15 @@ class Boltz2(LightningModule):
                 for key in self.predict_args["keys_dict_out"]:
                     pred_dict[key] = out[key]
             pred_dict["coords"] = out["sample_atom_coords"]
+            # Per-term steering energies, when the run was steered. pred_dict is
+            # an explicit allowlist, so these have to be copied across or the
+            # writer never sees them and the MAE carries no r_boltz_E_* at all.
+            for key, value in out.items():
+                if key.startswith("E_"):
+                    pred_dict[key] = value
+            for key in ("hydrogen_coords", "hydrogen_parents"):
+                if key in out:
+                    pred_dict[key] = out[key]
             if self.confidence_prediction:
                 # pred_dict["confidence"] = out.get("ablation_confidence", None)
                 pred_dict["pde"] = out["pde"]

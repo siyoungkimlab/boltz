@@ -629,6 +629,121 @@ MMFFTorsionConstraint = [
 ]
 
 
+####################################################################################################
+# LIGAND FORCE-FIELD CONSTRAINTS
+####################################################################################################
+#
+# Terms for the ligand force-field steering presets (gaff2, openff-*, mmff);
+# see model/potentials/ligand_ff.py for the functional forms.
+#
+# An atom index is NEGATIVE when it names a reconstructed hydrogen rather than a
+# predicted atom: -(ordinal + 1), where the ordinal indexes the rows of the
+# matching *HydrogenConstraint array. The models predict heavy atoms only, so
+# hydrogens are built at sampling time and appended after the padded atom width,
+# which is known in the featurizer and not here. Hydrogen-bearing terms must be
+# kept rather than dropped: GAFF spreads a bond's torsional barrier over all
+# nine i-j-k-l paths, and keeping only the heavy path INVERTS the profile
+# (cyclohexane: all nine paths minimise at 60 and 180 degrees, the heavy path
+# alone puts a maximum at the chair's 60).
+
+#: GAFF2/OpenFF bond: equilibrium length and AMBER's fc, which already folds in
+#: the 1/2, in kcal/mol/A^2 (e.g. 232.5 for a GAFF2 sp3 C-C).
+GAFFBondConstraint = [
+    ("atom_idxs", np.dtype("2i4")),
+    ("r0", np.dtype("f4")),
+    ("fc", np.dtype("f4")),
+]
+
+#: GAFF2/OpenFF angle, stored (outer, outer, CENTRE) -- the vertex is the THIRD
+#: index, as ligand_ff._angle_value expects. theta0 in radians, fc in
+#: kcal/mol/rad^2 and not normalized: those constants carry the balance of
+#: stiffness around a ring, which sets a five-ring's pucker.
+GAFFAngleConstraint = [
+    ("atom_idxs", np.dtype("3i4")),
+    ("theta0", np.dtype("f4")),
+    ("fc", np.dtype("f4")),
+]
+
+#: fc holds the seven Fourier coefficients of boonza's dihedral_trig,
+#: E = fc0 + sum_n fc_n cos(n phi - phi0); fc0 is a constant offset and the
+#: steering term ignores it. phi0 in radians.
+GAFFTorsionConstraint = [
+    ("atom_idxs", np.dtype("4i4")),
+    ("phi0", np.dtype("f4")),
+    ("fc", np.dtype("7f4")),
+]
+
+#: GAFF2/OpenFF 1-4 pair: 12-6 A and B with the force field's own 1-4 scaling
+#: already applied, plus q_i*q_j likewise scaled. NOT interchangeable with
+#: MMFF14Constraint, which stores R* and epsilon for a buffered 14-7.
+GAFF14Constraint = [
+    ("atom_idxs", np.dtype("2i4")),
+    ("aij", np.dtype("f4")),
+    ("bij", np.dtype("f4")),
+    ("qij", np.dtype("f4")),
+]
+
+#: Full intramolecular nonbonded pair (1-2, 1-3 and 1-4 all excluded):
+#: combined sigma and epsilon for the 12-6, and q_i*q_j unscaled.
+GAFFNonbondedConstraint = [
+    ("atom_idxs", np.dtype("2i4")),
+    ("sigma", np.dtype("f4")),
+    ("eps", np.dtype("f4")),
+    ("qq", np.dtype("f4")),
+]
+
+#: One reconstructed hydrogen, in ordinal order: its heavy parent and its bond
+#: length in angstrom. Nothing else is stored, because the hydrogen is placed
+#: from the parent's CURRENT heavy neighbours rather than rebuilt from internal
+#: coordinates measured on a reference conformer -- a ring CH2 hydrogen fixed
+#: against one ring neighbour ignores the other, and for cyclohexane that put
+#: the chair 62 kcal/mol above the twist-boat.
+GAFFHydrogenConstraint = [
+    ("atom_idx", np.dtype("i4")),
+    ("r", np.dtype("f4")),
+]
+
+#: MMFF bond: equilibrium length and 143.9325/2 * kb in kcal/mol/A^2
+#: (~306 for an sp3 C-C), not normalized.
+MMFFBondConstraint = [
+    ("atom_idxs", np.dtype("2i4")),
+    ("r0", np.dtype("f4")),
+    ("kb", np.dtype("f4")),
+]
+
+#: MMFF angle, stored (outer, outer, CENTRE) like GAFFAngleConstraint. theta0 in
+#: radians, ka as 143.9325 * ka in kcal/mol/rad^2 (the cosine well
+#: k (1 - cos dtheta) has curvature k, so this matches MMFF's harmonic bend).
+MMFFAngleConstraint = [
+    ("atom_idxs", np.dtype("3i4")),
+    ("theta0", np.dtype("f4")),
+    ("ka", np.dtype("f4")),
+]
+
+#: MMFF 1-4 pair: R* and epsilon for the buffered 14-7, plus q_i*q_j with
+#: MMFF's 0.75 electrostatic scaling already applied.
+MMFF14Constraint = [
+    ("atom_idxs", np.dtype("2i4")),
+    ("rstar", np.dtype("f4")),
+    ("eps", np.dtype("f4")),
+    ("qq", np.dtype("f4")),
+]
+
+#: MMFF full intramolecular nonbonded pair, same fields, no 1-4 scaling.
+MMFFNonbondedConstraint = [
+    ("atom_idxs", np.dtype("2i4")),
+    ("rstar", np.dtype("f4")),
+    ("eps", np.dtype("f4")),
+    ("qq", np.dtype("f4")),
+]
+
+#: MMFF counterpart of GAFFHydrogenConstraint.
+MMFFHydrogenConstraint = [
+    ("atom_idx", np.dtype("i4")),
+    ("r", np.dtype("f4")),
+]
+
+
 @dataclass(frozen=True)
 class ResidueConstraints(NumpySerializable):
     """ResidueConstraints datatype."""
@@ -640,6 +755,17 @@ class ResidueConstraints(NumpySerializable):
     planar_ring_5_constraints: np.ndarray
     planar_ring_6_constraints: np.ndarray
     mmff_torsion_constraints: Optional[np.ndarray] = None
+    gaff_bond_constraints: Optional[np.ndarray] = None
+    gaff_angle_constraints: Optional[np.ndarray] = None
+    gaff_torsion_constraints: Optional[np.ndarray] = None
+    gaff_pair14_constraints: Optional[np.ndarray] = None
+    gaff_nonbonded_constraints: Optional[np.ndarray] = None
+    gaff_hydrogen_constraints: Optional[np.ndarray] = None
+    mmff_bond_constraints: Optional[np.ndarray] = None
+    mmff_angle_constraints: Optional[np.ndarray] = None
+    mmff_pair14_constraints: Optional[np.ndarray] = None
+    mmff_nonbonded_constraints: Optional[np.ndarray] = None
+    mmff_hydrogen_constraints: Optional[np.ndarray] = None
 
 
 ####################################################################################################

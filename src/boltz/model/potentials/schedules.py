@@ -35,3 +35,26 @@ class PiecewiseStepFunction(ParameterSchedule):
         while idx < len(self.thresholds) and t > self.thresholds[idx]:
             idx += 1
         return self.values[idx]
+
+
+class LinearInterpolation(ParameterSchedule):
+    """``start_val`` at ``start_t`` falling linearly to ``end_val`` at
+    ``end_t``, and 0 outside that interval.
+
+    Used by the ligand force-field presets for ``guidance_ramp``, where the
+    guidance weight rises from 0 at t = 1 to its full value at t = 0 instead of
+    switching on at a threshold.
+    """
+
+    def __init__(self, start_t, end_t, start_val, end_val):
+        self.start_t = start_t
+        self.end_t = end_t
+        self.start_val = start_val
+        self.end_val = end_val
+
+    def compute(self, t):
+        if (t > self.start_t) or (t < self.end_t):
+            return 0.0
+        return self.start_val - (self.start_val - self.end_val) * (
+            self.start_t - t
+        ) / (self.start_t - self.end_t)
