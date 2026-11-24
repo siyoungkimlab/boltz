@@ -990,60 +990,84 @@ def process_symmetry_features(
 
 
 
-def process_ligand_angle_features(
-    constraint_features: dict,
+#: Ligand force-field term tables: feats key prefix -> (constraints attribute,
+#: index arity, value fields). One spec per term keeps the emission below
+#: table-driven rather than eleven near-identical blocks.
+_LIGAND_FF_TERMS = (
+    ("gaff_bond", "gaff_bond_constraints", 2, ("r0", "fc")),
+    ("gaff_angle", "gaff_angle_constraints", 3, ("theta0", "fc")),
+    ("gaff_torsion", "gaff_torsion_constraints", 4, ("phi0", "fc")),
+    ("gaff_pair", "gaff_pair14_constraints", 2, ("aij", "bij", "qij")),
+    ("gaff_nb", "gaff_nonbonded_constraints", 2, ("sigma", "eps", "qq")),
+    ("mmff_bond", "mmff_bond_constraints", 2, ("r0", "kb")),
+    ("mmff_angle", "mmff_angle_constraints", 3, ("theta0", "ka")),
+    ("mmff_torsion", "mmff_torsion_constraints", 4, ("v1", "v2", "v3")),
+    ("mmff_pair", "mmff_pair14_constraints", 2, ("rstar", "eps", "qq")),
+    ("mmff_nb", "mmff_nonbonded_constraints", 2, ("rstar", "eps", "qq")),
+)
+
+#: Hydrogen tables, handled apart because the potentials want the parent list
+#: as [1, 1, H] and the geometry as [1, H, 3] with the bond length in column 0.
+_LIGAND_FF_HYDROGENS = (
+    ("gaff_hydrogen", "gaff_hydrogen_constraints"),
+    ("mmff_hydrogen", "mmff_hydrogen_constraints"),
+)
+
+
+def process_ligand_ff_features(
+    data: Tokenized,
     atom_features: dict,
-) -> dict:
-    """Ligand bond angles and their reference values, for MMFFAnglePotential.
+) -> dict[str, Tensor]:
+    """Ligand force-field steering terms, for the gaff2/openff/mmff presets.
 
-    Derived rather than stored: the bonded pairs are already in
-    rdkit_bounds_index under rdkit_bounds_bond_mask, and the reference geometry
-    is already in ref_pos, so no new constraint table or schema change is
-    needed. Scope is ligand-only for free, because compute_geometry_constraints
-    runs for non-standard residues only.
+    A NEGATIVE stored atom index names a reconstructed hydrogen rather than a
+    predicted atom: -(ordinal + 1). The models predict heavy atoms only, so
+    ligand_ff._place_hydrogens appends hydrogens after the PADDED atom width,
+    which is known here and not at parse time. Resolving it here is what lets
+    the parse step keep hydrogen-bearing torsions and 1-4 pairs, and keeping
+    them matters: dropping them does not weaken the torsion term, it inverts it.
 
-    ref_pos carries a random roto-translation, which angles are invariant to.
+    Every key is emitted even with nothing to put in it, so a potential can
+    index feats unconditionally and simply contribute zero.
     """
-    empty = {
-        "ligand_angle_index": torch.empty((3, 0), dtype=torch.long),
-        "ligand_angle_theta0": torch.empty((0,), dtype=torch.float),
-    }
-    bond_index = constraint_features.get("rdkit_bounds_index")
-    bond_mask = constraint_features.get("rdkit_bounds_bond_mask")
-    ref_pos = atom_features.get("ref_pos")
-    if bond_index is None or bond_mask is None or ref_pos is None:
-        return empty
-    if bond_index.shape[1] == 0:
-        return empty
+    n_pad = int(atom_features["atom_pad_mask"].shape[-1])
+    constraints = getattr(data, "residue_constraints", None)
+    out: dict[str, Tensor] = {}
 
-    pairs = bond_index[:, bond_mask]
-    if pairs.shape[1] == 0:
-        return empty
+    def resolve(idxs):
+        """Stored indices -> coordinate rows, hydrogens after the padded width."""
+        idxs = torch.tensor(idxs.copy(), dtype=torch.long)
+        return torch.where(idxs < 0, n_pad - 1 - idxs, idxs)
 
-    neighbours: dict[int, set[int]] = {}
-    for first, second in zip(pairs[0].tolist(), pairs[1].tolist()):
-        neighbours.setdefault(first, set()).add(second)
-        neighbours.setdefault(second, set()).add(first)
+    for prefix, attr, arity, fields in _LIGAND_FF_TERMS:
+        rows = getattr(constraints, attr, None) if constraints is not None else None
+        if rows is not None and len(rows):
+            out[f"{prefix}_index"] = resolve(rows["atom_idxs"]).T
+            for f in fields:
+                v = torch.tensor(rows[f].copy(), dtype=torch.float)
+                out[f"{prefix}_{f}"] = v
+        else:
+            out[f"{prefix}_index"] = torch.empty((arity, 0), dtype=torch.long)
+            for f in fields:
+                # The GAFF torsion carries seven Fourier coefficients per term,
+                # so its empty shape is [0, 7] rather than [0].
+                shape = (0, 7) if (prefix == "gaff_torsion" and f == "fc") else (0,)
+                out[f"{prefix}_{f}"] = torch.empty(shape, dtype=torch.float)
 
-    triples = []
-    for vertex, around in neighbours.items():
-        ordered = sorted(around)
-        for i in range(len(ordered)):
-            for j in range(i + 1, len(ordered)):
-                triples.append((ordered[i], vertex, ordered[j]))
-    if not triples:
-        return empty
+    for prefix, attr in _LIGAND_FF_HYDROGENS:
+        rows = getattr(constraints, attr, None) if constraints is not None else None
+        if rows is not None and len(rows):
+            parent = resolve(rows["atom_idx"]).reshape(1, -1)
+            r = torch.tensor(rows["r"].copy(), dtype=torch.float)
+            geom = torch.zeros((r.shape[0], 3), dtype=torch.float)
+            geom[:, 0] = r
+        else:
+            parent = torch.empty((1, 0), dtype=torch.long)
+            geom = torch.empty((0, 3), dtype=torch.float)
+        out[f"{prefix}_ref"] = parent
+        out[f"{prefix}_geom"] = geom
 
-    index = torch.tensor(sorted(triples), dtype=torch.long).T
-    coords = ref_pos if ref_pos.dim() == 2 else ref_pos.reshape(-1, 3)
-    u = coords.index_select(0, index[0]) - coords.index_select(0, index[1])
-    v = coords.index_select(0, index[2]) - coords.index_select(0, index[1])
-    uh = u / torch.linalg.norm(u, dim=-1, keepdim=True)
-    vh = v / torch.linalg.norm(v, dim=-1, keepdim=True)
-    theta0 = torch.atan2(
-        torch.linalg.norm(torch.cross(uh, vh, dim=-1), dim=-1), (uh * vh).sum(-1)
-    )
-    return {"ligand_angle_index": index, "ligand_angle_theta0": theta0.float()}
+    return out
 
 
 def process_residue_constraint_features(
@@ -1094,26 +1118,6 @@ def process_residue_constraint_features(
             stereo_bond_constraints["is_e"].copy(), dtype=torch.bool
         )
 
-        mmff_torsion_constraints = residue_constraints.mmff_torsion_constraints
-        if mmff_torsion_constraints is not None and len(mmff_torsion_constraints):
-            mmff_torsion_index = torch.tensor(
-                mmff_torsion_constraints["atom_idxs"].copy(), dtype=torch.long
-            ).T
-            mmff_torsion_v1 = torch.tensor(
-                mmff_torsion_constraints["v1"].copy(), dtype=torch.float
-            )
-            mmff_torsion_v2 = torch.tensor(
-                mmff_torsion_constraints["v2"].copy(), dtype=torch.float
-            )
-            mmff_torsion_v3 = torch.tensor(
-                mmff_torsion_constraints["v3"].copy(), dtype=torch.float
-            )
-        else:
-            mmff_torsion_index = torch.empty((4, 0), dtype=torch.long)
-            mmff_torsion_v1 = torch.empty((0,), dtype=torch.float)
-            mmff_torsion_v2 = torch.empty((0,), dtype=torch.float)
-            mmff_torsion_v3 = torch.empty((0,), dtype=torch.float)
-
         planar_bond_index = torch.tensor(
             planar_bond_constraints["atom_idxs"].copy(), dtype=torch.long
         ).T
@@ -1144,10 +1148,6 @@ def process_residue_constraint_features(
         planar_bond_index = torch.empty((6, 0), dtype=torch.long)
         planar_ring_5_index = torch.empty((5, 0), dtype=torch.long)
         planar_ring_6_index = torch.empty((6, 0), dtype=torch.long)
-        mmff_torsion_index = torch.empty((4, 0), dtype=torch.long)
-        mmff_torsion_v1 = torch.empty((0,), dtype=torch.float)
-        mmff_torsion_v2 = torch.empty((0,), dtype=torch.float)
-        mmff_torsion_v3 = torch.empty((0,), dtype=torch.float)
 
     return {
         "rdkit_bounds_index": rdkit_bounds_index,
@@ -1162,10 +1162,6 @@ def process_residue_constraint_features(
         "stereo_reference_mask": stereo_reference_mask,
         "stereo_bond_orientations": stereo_bond_orientations,
         "planar_bond_index": planar_bond_index,
-        "mmff_torsion_index": mmff_torsion_index,
-        "mmff_torsion_v1": mmff_torsion_v1,
-        "mmff_torsion_v2": mmff_torsion_v2,
-        "mmff_torsion_v3": mmff_torsion_v3,
         "planar_ring_5_index": planar_ring_5_index,
         "planar_ring_6_index": planar_ring_6_index,
     }
@@ -1300,9 +1296,7 @@ class BoltzFeaturizer:
             residue_constraint_features = process_residue_constraint_features(data)
             chain_constraint_features = process_chain_feature_constraints(data)
             residue_constraint_features.update(
-                process_ligand_angle_features(
-                    residue_constraint_features, atom_features
-                )
+                process_ligand_ff_features(data, atom_features)
             )
 
         return {

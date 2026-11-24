@@ -18,7 +18,10 @@ from boltz.data.write.dms import to_dms
 from boltz.data.write.mae import to_mae
 from boltz.data.write.mmcif import to_mmcif
 from boltz.data.write.pdb import to_pdb
-from boltz.data.write.properties import confidence_properties
+from boltz.data.write.properties import (
+    confidence_properties,
+    steering_energy_properties,
+)
 from boltz.timing import PredictionTimer, read_preprocessing_timing, write_timing
 
 # Formats that write bond orders and formal charges, read from the reference
@@ -271,7 +274,7 @@ class BoltzWriter(TimedPredictionWriter):
 
                 # Get the confidence summary, also written into MAE and DMS
                 confidence_summary_dict = None
-                properties = None
+                properties = {}
                 if "plddt" in prediction:
                     confidence_summary_dict = {}
                     for key in [
@@ -299,9 +302,30 @@ class BoltzWriter(TimedPredictionWriter):
                         }
                         for idx1 in prediction["pair_chains_iptm"]
                     }
-                    properties = confidence_properties(
-                        confidence_summary_dict, new_structure
+                    properties.update(
+                        confidence_properties(
+                            confidence_summary_dict, new_structure
+                        )
                     )
+
+                # Per-term steering energies, when the run was steered.
+                # Independent of the confidence block above: a steered run
+                # without confidence scores must still record them.
+                properties.update(
+                    steering_energy_properties(prediction, model_idx)
+                )
+
+                # Reconstructed ligand hydrogens for this sample, when the run
+                # was steered with a ligand force field.
+                hydrogens = None
+                if "hydrogen_coords" in prediction:
+                    try:
+                        hydrogens = (
+                            prediction["hydrogen_coords"][model_idx],
+                            prediction["hydrogen_parents"],
+                        )
+                    except (IndexError, KeyError, TypeError):
+                        hydrogens = None
 
                 # Save the structure
                 if self.output_format == "pdb":
@@ -327,6 +351,7 @@ class BoltzWriter(TimedPredictionWriter):
                                 boltz2=self.boltz2,
                                 title=outname,
                                 properties=properties,
+                                hydrogens=hydrogens,
                             )
                         )
                 elif self.output_format == "dms":

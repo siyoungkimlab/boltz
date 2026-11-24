@@ -5,7 +5,11 @@ from rdkit.Chem import Mol
 from torch import Tensor
 
 from boltz.data.types import Structure
-from boltz.data.write.topology import TopologyAtom, build_topology
+from boltz.data.write.topology import (
+    TopologyAtom,
+    add_hydrogens,
+    build_topology,
+)
 
 _MAE_VERSION_BLOCK = "{\n s_m_m2io_version\n :::\n 2.0.0\n}\n\n"
 
@@ -56,6 +60,7 @@ def to_mae(
     boltz2: bool = False,
     *,
     title: str = "boltz",
+    hydrogens: Optional[tuple] = None,
     properties: Optional[dict[str, float]] = None,
 ) -> str:
     """Write a structure into a Maestro file.
@@ -74,6 +79,9 @@ def to_mae(
     properties : dict[str, float], optional
         Properties of the whole structure, such as its confidence scores,
         written as ``r_<name>`` in its ``f_m_ct`` block.
+    hydrogens : tuple, optional
+        ``(positions, parents)`` of reconstructed ligand hydrogens to append,
+        each one joining its parent's residue and chain.
 
     Returns
     -------
@@ -82,6 +90,11 @@ def to_mae(
 
     """
     topology = build_topology(structure, molecules, plddts=plddts, boltz2=boltz2)
+    if hydrogens is not None:
+        # The ligand force-field presets evaluate their torsion and 1-4 terms
+        # with reconstructed hydrogens; writing them keeps the file consistent
+        # with what steered it.
+        topology = add_hydrogens(topology, *hydrogens)
 
     header = [("s_m_title", _quote(title))]
     header += [(f"r_{name}", repr(value)) for name, value in (properties or {}).items()]

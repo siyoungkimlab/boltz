@@ -28,6 +28,7 @@ from boltz.data.types import (
     TemplateInfo,
     Tokenized,
 )
+from boltz.data.feature.featurizer import process_ligand_ff_features
 from boltz.model.modules.utils import center_random_augmentation
 
 ####################################################################################################
@@ -2332,6 +2333,9 @@ class Boltz2Featurizer:
         contact_constraint_features = {}
         if compute_constraint_features:
             residue_constraint_features = process_residue_constraint_features(data)
+            residue_constraint_features.update(
+                process_ligand_ff_features(data, atom_features)
+            )
             chain_constraint_features = process_chain_feature_constraints(data)
             contact_constraint_features = process_contact_feature_constraints(
                 data=data,

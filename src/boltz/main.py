@@ -161,13 +161,29 @@ class BoltzSteeringParams:
     """Steering parameters."""
 
     fk_steering: bool = False
-    mmff_angle: bool = False
-    mmff_torsion: bool = False
-    mmff_angle_weight: float = 0.10
-    mmff_torsion_weight: float = 0.001
+    #: Ligand force field supplying the steering terms: "gaff2", an OpenFF
+    #: release such as "openff-2.2.1", or "mmff". None keeps Boltz's own
+    #: physicality-only steering. Set by --sampler.
+    ligand_ff: str | None = None
+    #: Per-term overrides for get_ligand_potentials, from -F/-P.
+    ligand_ff_overrides: dict | None = None
+    #: Langevin guidance: thermal energy in kcal/mol and the guidance weight
+    #: the noise is matched to. None is plain gradient descent.
+    langevin_kT: float | None = None
+    langevin_weight: float | None = None
+    langevin_t_on: float = 1.0
+    #: Stop the Langevin noise below this t, and/or fade it with sigma. Both
+    #: exist because the kick injected at sigma ~ 0 cannot be repaired by the
+    #: model and lands directly in the output.
+    langevin_t_off: float = 0.0
+    langevin_anneal: bool = False
     num_particles: int = 3
     fk_lambda: float = 4.0
     fk_resampling_interval: int = 3
+    #: Particles per independent resampling group. None keeps Boltz's own
+    #: behaviour, one group per output sample; 0 puts every particle in one
+    #: group, so selection draws on the whole pool.
+    resampling_group_size: int | None = None
     physical_guidance_update: bool = False
     contact_guidance_update: bool = True
     num_gd_steps: int = 20
@@ -175,6 +191,218 @@ class BoltzSteeringParams:
     bond_guidance_weight: float = 0.15
     chiral_guidance_weight: float = 0.1
     stereo_bond_guidance_weight: float = 0.05
+
+
+#: -S keys that reach the sampler, with the type to read them as.
+_SAMPLER_OVERRIDE_TYPES = {
+    "num_particles": int,
+    "fk_lambda": float,
+    "fk_resampling_interval": int,
+    "num_gd_steps": int,
+    "resampling_group_size": int,
+    "langevin_kT": float,
+    "langevin_weight": float,
+    "langevin_t_on": float,
+    "langevin_t_off": float,
+    "langevin_anneal": bool,
+}
+
+#: -P switches, which turn one force-field term (or the physicality set) on or off.
+_POTENTIAL_SWITCHES = (
+    "bond", "angle", "torsion", "pairs14", "nonbonded", "hydrogen",
+    "physicality",
+)
+
+#: -F parameters, passed through to get_ligand_potentials.
+_POTENTIAL_PARAM_TYPES = {
+    # Not a number: one of none, bond_angle, all (see LIGAND_DROP_SETS).
+    "drop_overriding": str,
+    "bond_weight": float,
+    "angle_weight": float,
+    "torsion_weight": float,
+    "pair14_weight": float,
+    "nonbonded_weight": float,
+    "bond_cutoff": float,
+    "angle_cutoff": float,
+    "dielectric": float,
+    "pairs14_dielectric": float,
+    "nonbonded_dielectric": float,
+    "lj_core_switch": float,
+    "coulomb_core_switch": float,
+    "t_on": float,
+    "nonbonded_t_on": float,
+    "bond_uniform_k": bool,
+    "angle_uniform_k": bool,
+    "guidance_ramp": bool,
+    # Two-stage bond/angle guidance: the weight above holds for
+    # bond_angle_late_t_on < t <= t_on, then this one for t <= late_t_on.
+    "bond_angle_late_weight": float,
+    "bond_late_weight": float,
+    "angle_late_weight": float,
+    "bond_angle_late_t_on": float,
+}
+
+
+def _parse_kv(entries, name):
+    out = {}
+    for entry in entries:
+        if "=" not in entry:
+            msg = f"{name} takes KEY=VALUE, got {entry!r}"
+            raise click.ClickException(msg)
+        key, _, value = entry.partition("=")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _coerce(value, kind, key):
+    if kind is bool:
+        if value.lower() in ("1", "true", "yes", "on"):
+            return True
+        if value.lower() in ("0", "false", "no", "off"):
+            return False
+        msg = f"{key} takes a boolean, got {value!r}"
+        raise click.ClickException(msg)
+    try:
+        return kind(value)
+    except ValueError as exc:
+        msg = f"{key} takes {kind.__name__}, got {value!r}"
+        raise click.ClickException(msg) from exc
+
+
+def write_parameters(path, steering_args, sampler, boltz2: bool) -> None:
+    """Write every steering parameter in effect, read off the constructed
+    objects rather than the command line, so a run can be audited from its
+    own output. Mirrors bioemu2's parameters.yaml.
+    """
+    from boltz.model.potentials.ligand_ff import get_ligand_potentials
+
+    args = asdict(steering_args)
+    overrides = args.get("ligand_ff_overrides") or {}
+    try:
+        potentials = get_ligand_potentials(
+            args, sampler, boltz2=boltz2, **overrides)
+    except Exception as exc:                      # never fail a run over this
+        potentials = []
+        note = f"# could not reconstruct potentials: {type(exc).__name__}: {exc}\n"
+    else:
+        note = ""
+
+    flag = {k: f"-S {k}" for k in _SAMPLER_OVERRIDE_TYPES}
+    lines = [
+        "# Every parameter in effect for this run, read off the constructed",
+        "# objects. The 'cli' field is the flag that sets it; a blank one is",
+        "# not reachable from the command line.",
+        f"sampler: {sampler}",
+        f"model: {'boltz2' if boltz2 else 'boltz1'}",
+        "steering:",
+    ]
+    for key in sorted(args):
+        if key in ("ligand_ff_overrides",):
+            continue
+        cli = f"            # {flag[key]}" if key in flag else ""
+        lines.append(f"  {key}: {args[key]}{cli}")
+    lines.append("ligand_ff_overrides:"
+                 + ("" if overrides else " {}"))
+    for key in sorted(overrides):
+        lines.append(f"  {key}: {overrides[key]}            # -F {key}")
+    lines.append("potentials:")
+    for p in potentials:
+        lines.append(f"  - class: {type(p).__name__}")
+        try:
+            params = p.compute_parameters(0.0) or {}
+        except Exception:
+            params = {}
+        for k in sorted(params):
+            lines.append(f"      {k}: {params[k]}")
+        rw = getattr(p, "resampling_weight", None)
+        if rw is not None:
+            lines.append(f"      resampling_weight: {rw}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(note + "\n".join(lines) + "\n")
+
+
+def apply_ligand_ff_preset(
+    steering_args,
+    sampler,
+    sampler_overrides=(),
+    potential_switches=(),
+    potential_params=(),
+):
+    """Configure steering for --sampler <force field>, then apply -S/-P/-F.
+
+    The defaults are the ones measured on the 15-ligand benchmark against 30 ns
+    of GAFF2 MD (2026-11-23):
+
+      * every bonded weight a quarter of the force-matched set, because the
+        guidance is fixed-step descent and a weight is a step length, not a
+        strength: bad bonds 6.3% -> 0.00%, bond deviation 4.5% -> 2.0% against
+        MD's own 1.6% floor;
+      * num_gd_steps raised to pay the soft terms back the step length that the
+        smaller weights cost them, since w * steps is what reaches a fixed
+        point;
+      * three particles per output sample, each sample its own resampling
+        group, so selection runs within a sample rather than over one global
+        pool;
+      * Langevin guidance at the cool weight, which leaves bonds and ring
+        pucker intact; LIGAND_STEER_LANGEVIN_WEIGHT documents the trade against
+        conformational spread.
+    """
+    from boltz.model.potentials.ligand_ff import (
+        LIGAND_PRESETS,
+        LIGAND_STEER_GD_STEPS,
+        LIGAND_STEER_LANGEVIN_KT,
+        LIGAND_STEER_LANGEVIN_WEIGHT,
+        LIGAND_STEER_PARTICLES_PER_SAMPLE,
+        LIGAND_STEER_T_ON,
+    )
+
+    if sampler not in LIGAND_PRESETS:
+        msg = (f"unknown --sampler {sampler!r}; choose from "
+               f"{', '.join(LIGAND_PRESETS)}")
+        raise click.ClickException(msg)
+
+    steering_args.fk_steering = True
+    steering_args.physical_guidance_update = True
+    steering_args.ligand_ff = sampler
+    steering_args.num_particles = LIGAND_STEER_PARTICLES_PER_SAMPLE
+    steering_args.num_gd_steps = LIGAND_STEER_GD_STEPS
+    steering_args.langevin_kT = LIGAND_STEER_LANGEVIN_KT
+    steering_args.langevin_weight = LIGAND_STEER_LANGEVIN_WEIGHT
+    steering_args.langevin_t_on = LIGAND_STEER_T_ON
+
+    sampler_kv = _parse_kv(sampler_overrides, "-S")
+    for key, value in sampler_kv.items():
+        if key not in _SAMPLER_OVERRIDE_TYPES:
+            msg = (f"unknown -S key {key!r}; choose from "
+                   f"{', '.join(sorted(_SAMPLER_OVERRIDE_TYPES))}")
+            raise click.ClickException(msg)
+        setattr(steering_args, key,
+                _coerce(value, _SAMPLER_OVERRIDE_TYPES[key], key))
+
+    # One independent resampling group per output sample, sized from the FINAL
+    # k so that -S num_particles=N still gives groups of N rather than groups
+    # of the preset's 3. An explicit -S resampling_group_size wins, including 0
+    # for one global group over the whole batch. Below k = 2 there is nothing to
+    # select between, so fall back to None, Boltz's own per-sample grouping.
+    if "resampling_group_size" not in sampler_kv:
+        k = max(1, int(steering_args.num_particles or 1))
+        steering_args.resampling_group_size = k if k >= 2 else None
+
+    overrides = {}
+    for key, value in _parse_kv(potential_switches, "-P").items():
+        if key not in _POTENTIAL_SWITCHES:
+            msg = (f"unknown -P term {key!r}; choose from "
+                   f"{', '.join(_POTENTIAL_SWITCHES)}")
+            raise click.ClickException(msg)
+        overrides[key] = _coerce(value, bool, key)
+    for key, value in _parse_kv(potential_params, "-F").items():
+        if key not in _POTENTIAL_PARAM_TYPES:
+            msg = (f"unknown -F key {key!r}; choose from "
+                   f"{', '.join(sorted(_POTENTIAL_PARAM_TYPES))}")
+            raise click.ClickException(msg)
+        overrides[key] = _coerce(value, _POTENTIAL_PARAM_TYPES[key], key)
+    steering_args.ligand_ff_overrides = overrides or None
+    return steering_args
 
 
 @rank_zero_only
@@ -572,6 +800,7 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
     msa_dir: Path,
     mol_dir: Path,
     boltz2: bool,
+    ligand_ff: Optional[str],
     use_msa_server: bool,
     msa_server_url: str,
     msa_pairing_strategy: str,
@@ -594,9 +823,9 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
     try:
         # Parse data
         if path.suffix.lower() in (".fa", ".fas", ".fasta"):
-            target = parse_fasta(path, ccd, mol_dir, boltz2)
+            target = parse_fasta(path, ccd, mol_dir, boltz2, ligand_ff)
         elif path.suffix.lower() in (".yml", ".yaml"):
-            target = parse_yaml(path, ccd, mol_dir, boltz2)
+            target = parse_yaml(path, ccd, mol_dir, boltz2, ligand_ff)
         elif path.is_dir():
             msg = f"Found directory {path} instead of .fasta or .yaml, skipping."
             raise RuntimeError(msg)  # noqa: TRY301
@@ -769,6 +998,7 @@ def process_inputs(
     api_key_value: Optional[str] = None,
     boltz2: bool = False,
     preprocessing_threads: int = 1,
+    ligand_ff: Optional[str] = None,
 ) -> Manifest:
     """Process the input data and output directory.
 
@@ -813,6 +1043,28 @@ def process_inputs(
             "and API key authentication (--api_key_header/--api_key_value). Please use only one authentication method."
         )
 
+    # The ligand force field is baked into the processed constraints, so a
+    # processed directory belongs to exactly one of them. Without this guard a
+    # second run with a different --sampler would silently reuse the first
+    # force field's terms and report them as the second's.
+    ff_marker = out_dir / "processed" / "ligand_ff.txt"
+    if ff_marker.exists():
+        # Compare the raw strings: normalizing "" to None here and comparing
+        # against "" made an unsteered rerun look like a mismatch with itself.
+        previous = ff_marker.read_text().strip()
+        if previous != (ligand_ff or ""):
+            prev_label = previous or "none"
+            msg = (
+                f"{out_dir / 'processed'} was built with ligand force field "
+                f"{prev_label!r}, but this run asks for "
+                f"{(ligand_ff or 'none')!r}. The force-field terms are stored "
+                "in the processed inputs, so they cannot be reused. Use a "
+                "different --out_dir, or delete that directory."
+            )
+            raise click.ClickException(msg)
+    elif (out_dir / "processed").exists():
+        ff_marker.write_text(ligand_ff or "")
+
     # Check if records exist at output path
     records_dir = out_dir / "processed" / "records"
     if records_dir.exists():
@@ -834,6 +1086,8 @@ def process_inputs(
             updated_manifest.dump(out_dir / "processed" / "manifest.json")
 
     # Create output directories
+    (out_dir / "processed").mkdir(parents=True, exist_ok=True)
+    ff_marker.write_text(ligand_ff or "")
     msa_dir = out_dir / "msa"
     records_dir = out_dir / "processed" / "records"
     structure_dir = out_dir / "processed" / "structures"
@@ -867,6 +1121,7 @@ def process_inputs(
         msa_dir=msa_dir,
         mol_dir=mol_dir,
         boltz2=boltz2,
+        ligand_ff=ligand_ff,
         use_msa_server=use_msa_server,
         msa_server_url=msa_server_url,
         msa_pairing_strategy=msa_pairing_strategy,
@@ -1067,43 +1322,51 @@ def cli() -> None:
     default=None,
 )
 @click.option(
-    "--mmff_torsion",
-    is_flag=True,
-    default=False,
-    help="Restrain every ligand torsion with the three-term MMFF form, "
-         "V1/V2/V3 taken from RDKit's MMFF typing. Unlike --mmff this changes "
-         "which conformer the ligand adopts, so it moves poses. Implies "
-         "--use_potentials.",
+    "--sampler",
+    type=str,
+    default=None,
+    help="Steer the ligand with a force field: 'gaff2', 'openff-2.2.1' or "
+         "'mmff'. This switches on FK resampling and the guidance loop and "
+         "applies the benchmarked configuration -- the physicality set without "
+         "PoseBusters/bond-length/bond-angle (which override a ligand force "
+         "field), the force field's own bond, angle, 1-4, nonbonded and torsion "
+         "terms, Langevin guidance, 5 particles per sample and one global "
+         "resampling group. GAFF2 and OpenFF need parameters from boonza "
+         "(pip install -e '.[ligand-ff]'); MMFF is typed by RDKit.",
 )
 @click.option(
-    "--mmff_angle",
-    is_flag=True,
-    default=False,
-    help="Restrain every ligand bond angle to its reference-conformer value "
-         "with an MMFF-style cosine well, E = k (1 - cos(theta - theta0)). "
-         "Switches on the guidance loop, so it also enables the seven stock "
-         "potentials as --use_potentials does.",
+    "-S",
+    "sampler_overrides",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Override a sampler setting, repeatable: num_particles, fk_lambda, "
+         "fk_resampling_interval, num_gd_steps, resampling_group_size, "
+         "langevin_kT, langevin_weight, langevin_t_on, "
+         "langevin_t_off, langevin_anneal. "
+         "e.g. -S num_particles=10 -S langevin_weight=0.01",
 )
 @click.option(
-    "--mmff",
-    is_flag=True,
-    default=False,
-    help="Both MMFF terms: identical to --mmff_angle --mmff_torsion.",
+    "-P",
+    "potential_switches",
+    multiple=True,
+    metavar="NAME=0|1",
+    help="Turn one force-field term on or off, repeatable: bond, angle, "
+         "torsion, pairs14, nonbonded, hydrogen, physicality, drop_overriding. "
+         "e.g. -P nonbonded=0 -P physicality=0",
 )
 @click.option(
-    "--mmff_angle_weight",
-    type=float,
-    default=0.10,
-    help="Guidance step size for the MMFF angle term. Its k is 1, so this is "
-         "the force directly; 0.10 matches ChiralAtomPotential.",
-)
-@click.option(
-    "--mmff_torsion_weight",
-    type=float,
-    default=0.001,
-    help="Guidance step size for the MMFF torsion term. NOT comparable to "
-         "--mmff_angle_weight: this multiplies MMFF's V coefficients, which "
-         "reach 7.0 for an aromatic ring, so 0.05 destroys geometry.",
+    "-F",
+    "potential_params",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Override a force-field term parameter, repeatable: "
+         "bond_weight, angle_weight, torsion_weight, pair14_weight, "
+         "nonbonded_weight, bond_cutoff, angle_cutoff, dielectric, "
+         "pairs14_dielectric, nonbonded_dielectric, lj_core_switch, "
+         "coulomb_core_switch, t_on, nonbonded_t_on, guidance_ramp, "
+         "bond_angle_late_weight, bond_late_weight, angle_late_weight, "
+         "bond_angle_late_t_on. "
+         "e.g. -F nonbonded_weight=0.0075 -F t_on=0.4",
 )
 @click.option(
     "--use_potentials",
@@ -1238,11 +1501,10 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     api_key_header: Optional[str] = None,
     api_key_value: Optional[str] = None,
     use_potentials: bool = False,
-    mmff: bool = False,
-    mmff_angle: bool = False,
-    mmff_torsion: bool = False,
-    mmff_angle_weight: float = 0.10,
-    mmff_torsion_weight: float = 0.001,
+    sampler: Optional[str] = None,
+    sampler_overrides: tuple[str, ...] = (),
+    potential_switches: tuple[str, ...] = (),
+    potential_params: tuple[str, ...] = (),
     bond_guidance_weight: Optional[float] = None,
     chiral_guidance_weight: Optional[float] = None,
     stereo_bond_guidance_weight: Optional[float] = None,
@@ -1260,10 +1522,6 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     check_guidance_weights(
         {
             "use_potentials": use_potentials,
-            "mmff_angle": mmff or mmff_angle,
-            "mmff_torsion": mmff or mmff_torsion,
-            "mmff_angle_weight": mmff_angle_weight,
-            "mmff_torsion_weight": mmff_torsion_weight,
             "bond_guidance_weight": bond_guidance_weight,
             "chiral_guidance_weight": chiral_guidance_weight,
             "stereo_bond_guidance_weight": stereo_bond_guidance_weight,
@@ -1367,6 +1625,11 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         boltz2=model == "boltz2",
         preprocessing_threads=preprocessing_threads,
         max_msa_seqs=max_msa_seqs,
+        # The force field is chosen here, not at sampling time: gaff2 and
+        # openff-2.2.1 are different parameter sets, so the terms have to be
+        # built during parsing. A cached processed input therefore belongs to
+        # one force field -- see the out_dir note in the --sampler help.
+        ligand_ff=sampler,
     )
 
     # Load manifest
@@ -1461,6 +1724,13 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         devices=devices,
         # bf16 is only fast on accelerators; on a CPU it is far slower than fp32.
         precision=32 if model == "boltz1" or accelerator == "cpu" else "bf16-mixed",
+        # The ligand force-field potentials take their gradients with autograd.
+        # Under inference_mode those gradients are silently zero (and a clone
+        # of the coords does not help: feats are inference tensors as well),
+        # which disabled ligand steering entirely while the energies still
+        # looked correct. no_grad, which Lightning uses instead, is liftable
+        # with torch.enable_grad().
+        inference_mode=False,
     )
 
     if filtered_manifest.records:
@@ -1509,19 +1779,26 @@ def predict(  # noqa: C901, PLR0915, PLR0912
 
         steering_args = BoltzSteeringParams()
         steering_args.fk_steering = use_potentials
-        # --mmff is the convenience form for both terms. Either term needs
-        # the guidance loop, which only runs when physical_guidance_update is
-        # set -- and the seven stock potentials gate their weights on the same
-        # flag, so they come along with it.
-        mmff_angle_on = mmff or mmff_angle
-        mmff_torsion_on = mmff or mmff_torsion
-        steering_args.physical_guidance_update = (
-            use_potentials or mmff_angle_on or mmff_torsion_on
-        )
-        steering_args.mmff_angle = mmff_angle_on
-        steering_args.mmff_torsion = mmff_torsion_on
-        steering_args.mmff_angle_weight = mmff_angle_weight
-        steering_args.mmff_torsion_weight = mmff_torsion_weight
+        steering_args.physical_guidance_update = use_potentials
+        if sampler:
+            # --sampler <force field>: FK resampling plus the guidance loop,
+            # with the configuration the 15-ligand benchmark settled on.
+            # Mirrors bioemu2's ligand presets so the two are comparable.
+            apply_ligand_ff_preset(
+                steering_args,
+                sampler,
+                sampler_overrides,
+                potential_switches,
+                potential_params,
+            )
+        elif sampler_overrides or potential_switches or potential_params:
+            msg = "-S/-P/-F need --sampler to say which force field to steer with."
+            raise click.ClickException(msg)
+        if sampler:
+            # Self-documenting run: the record is written before sampling so
+            # it survives a crash mid-prediction.
+            write_parameters(out_dir / "parameters.yaml", steering_args,
+                             sampler, model == "boltz2")
         if bond_guidance_weight is not None:
             steering_args.bond_guidance_weight = bond_guidance_weight
         if chiral_guidance_weight is not None:
