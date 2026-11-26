@@ -175,6 +175,7 @@ def _hydrogen_plan(parent, bonds, element):
       2 heavy + 1 H   (=CH-, ring NH)    tri2: in plane, opposite the bisector
       1 heavy, 4-coordinate (CH3, NH3+)  term: staggered, dihedral 180 / +60 / -60
       1 heavy, 3-coordinate (NH2, =CH2)  term: planar, dihedral 0 / 180
+      1 heavy, 2-coordinate sp C (#CH)   linear: along the B->P axis
       1 heavy, 2-coordinate (OH, SH)     rotor: lowest-energy rotamer
 
     Dihedrals are H-P-B-D with B the parent's heavy neighbour and D a heavy
@@ -202,7 +203,19 @@ def _hydrogen_plan(parent, bonds, element):
         elif len(heavy) == 1:
             b = heavy[0]
             d = sorted(x for x in nb.get(b, ()) if x != p)
-            if not d:
+            if coord == 2 and len(ks) == 1 and element[p] == 6:
+                # sp carbon: one heavy neighbour plus one hydrogen can only be
+                # a terminal alkyne, whose C-H lies on the extension of the
+                # B->P axis. It needs its own rule rather than an _H_BENT
+                # entry of 180 deg, because at 180 the bend-and-dihedral
+                # construction is degenerate -- e1 is the unit part of a
+                # vector that has become parallel to a -- and would give NaN.
+                # No dihedral is needed, so this is placed before the `d`
+                # guard and covers acetylene itself, where B has no other
+                # heavy neighbour. Carbon only: a 2-coordinate N-H (an imine)
+                # is bent, not linear, and divalent carbenes are not in scope.
+                plan.setdefault("linear", []).append((ks[0], p, b))
+            elif not d:
                 uncovered += ks
             elif coord == 4 and len(ks) == 3:
                 for k, phi in zip(ks, (180.0, 60.0, -60.0)):
@@ -291,6 +304,11 @@ def _place_hydrogens(coords, plan, r, rotor_phi=None):
         s = _unit(at(a) - p0) + _unit(at(b) - p0) + _unit(at(c) - p0)
         idx += k
         pos.append(p0 - r[k].unsqueeze(-1) * _unit(s))
+    if plan.get("linear"):
+        k, p, b = map(list, zip(*plan["linear"]))
+        p0 = at(p)
+        idx += k
+        pos.append(p0 - r[k].unsqueeze(-1) * _unit(at(b) - p0))
     if plan.get("tet2"):
         k0, k1, p, a, b = map(list, zip(*plan["tet2"]))
         p0 = at(p)
@@ -1061,8 +1079,9 @@ LIGAND_STEER_T_ON = 0.4
 #: Langevin guidance: x0 <- x0 - sum w grad E + sqrt(2 w kT) xi, with kT at
 #: room temperature in kcal/mol. The kick is added once per descent step, INSIDE
 #: the inner loop, so the noise accumulates as sqrt(N) while the drift
-#: accumulates linearly: at LIGAND_STEER_GD_STEPS this weight is about 0.39 A of
-#: thermal displacement, where the old 0.005 would be 0.77 A.
+#: accumulates linearly: at LIGAND_STEER_GD_STEPS this weight is about 0.17 A of
+#: thermal displacement, where the old 0.005 would be 0.35 A. (Those were 0.39
+#: and 0.77 A when this constant was 100; both scale as sqrt(steps).)
 #:
 #: This is a trade, not an ordering. Measured at bond/angle 0.00025, gd 80,
 #: as bioemu2 / boltz1:
@@ -1092,9 +1111,21 @@ LIGAND_STEER_PARTICLES_PER_SAMPLE = 3
 #: descent, and the soft terms need the steps that the x0.25 weights cost them:
 #: it is w * steps that reaches a fixed point. 80 and 20 were benchmarked -- in
 #: boltz1 they tie, in bioemu2 20 loses the open conformers (bipyridine N-C-C-N
-#: 122 deg -> 45, against MD's 166). 100 extrapolates the better of the two and
-#: is NOT itself benchmarked.
-LIGAND_STEER_GD_STEPS = 100
+#: 122 deg -> 45, against MD's 166). 100 extrapolated the better of the two and
+#: was never itself benchmarked.
+#:
+#: Set to 20 by request, 2026-11-25, with that bioemu2 result known and
+#: accepted. Two things follow, neither of them only a cost saving:
+#:   - bioemu2 is expected to close the open conformers again, as measured.
+#:   - the Langevin kick is applied once per descent step, so its accumulated
+#:     thermal displacement falls with sqrt(N): about 0.17 A here against the
+#:     0.39 A of 100 steps. Fewer steps is also colder.
+#: A later sweep over gd 20-100 found the aggregate error flat (mean 48.9 ->
+#: 41.5 deg) with 0% broken bonds throughout, which is why 20 is defensible
+#: despite the above; the aggregate is dominated by wrong-basin cells that gd
+#: does not move either way.
+#: Raise it back to 100 with -S num_gd_steps=100, or revert this constant.
+LIGAND_STEER_GD_STEPS = 20
 
 #: vdW core switch fraction, by force field. See _core_switch.
 LIGAND_STEER_LJ_CORE_SWITCH = {"gaff2": 0.7, "mmff": 0.5}
