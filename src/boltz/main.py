@@ -275,12 +275,17 @@ def write_parameters(path, steering_args, sampler, boltz2: bool) -> None:
     own output. Mirrors bioemu2's parameters.yaml.
     """
     from boltz.model.potentials.ligand_ff import get_ligand_potentials
+    from boltz.model.potentials.potentials import get_potentials
 
     args = asdict(steering_args)
     overrides = args.get("ligand_ff_overrides") or {}
     try:
-        potentials = get_ligand_potentials(
-            args, sampler, boltz2=boltz2, **overrides)
+        # No --sampler means no ligand force field: the run is steered by
+        # Boltz's own physicality set, so dump that set instead.
+        potentials = (get_ligand_potentials(args, sampler, boltz2=boltz2,
+                                            **overrides)
+                      if sampler
+                      else list(get_potentials(args, boltz2=boltz2)))
     except Exception as exc:                      # never fail a run over this
         potentials = []
         note = f"# could not reconstruct potentials: {type(exc).__name__}: {exc}\n"
@@ -1791,10 +1796,26 @@ def predict(  # noqa: C901, PLR0915, PLR0912
                 potential_switches,
                 potential_params,
             )
-        elif sampler_overrides or potential_switches or potential_params:
-            msg = "-S/-P/-F need --sampler to say which force field to steer with."
+        elif potential_switches or potential_params:
+            msg = "-P/-F need --sampler to say which force field to steer with."
             raise click.ClickException(msg)
-        if sampler:
+        elif sampler_overrides:
+            # No force field, but the sampler itself is still configurable, so
+            # Boltz's own physicality steering can be run at the same
+            # num_gd_steps / num_particles / grouping as a force-field arm.
+            # Without this the reference arm is pinned to the dataclass
+            # defaults and is not comparable to one.
+            if not use_potentials:
+                msg = "-S needs --use_potentials or --sampler; there is no sampler to configure."
+                raise click.ClickException(msg)
+            for key, value in _parse_kv(sampler_overrides, "-S").items():
+                if key not in _SAMPLER_OVERRIDE_TYPES:
+                    msg = (f"unknown -S key {key!r}; choose from "
+                           f"{', '.join(sorted(_SAMPLER_OVERRIDE_TYPES))}")
+                    raise click.ClickException(msg)
+                setattr(steering_args, key,
+                        _coerce(value, _SAMPLER_OVERRIDE_TYPES[key], key))
+        if sampler or use_potentials:
             # Self-documenting run: the record is written before sampling so
             # it survives a crash mid-prediction.
             write_parameters(out_dir / "parameters.yaml", steering_args,
